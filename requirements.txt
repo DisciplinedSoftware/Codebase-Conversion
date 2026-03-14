@@ -1,0 +1,6 @@
+# Runtime dependencies for the Fortran-to-Rust conversion pipeline
+requests>=2.31.0
+rich>=13.7.0
+click>=8.1.0
+colorama>=0.4.6
+fparser>=0.2.1

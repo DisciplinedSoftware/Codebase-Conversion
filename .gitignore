@@ -1,3 +1,20 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Rust build artefacts
+target/
+
+# Pipeline output (generated at runtime)
+output/
+
 # Prerequisites
 *.d
 
