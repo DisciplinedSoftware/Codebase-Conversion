@@ -148,36 +148,6 @@ output/
 
 ---
 
-## Repository structure
-
-```
-.devcontainer/
-├── Dockerfile          # Python 3.12 + Rust + gfortran + f2c
-└── devcontainer.json   # VS Code / Codespaces configuration
-
-fortran_to_rust/
-├── fetcher.py          # Download BLAS source (with embedded dgemm fallback)
-├── parser.py           # Fortran-77 fixed-form parser
-├── call_graph.py       # Call-graph builder + topological sort
-├── llm_client.py       # LLM API client (Copilot / OpenAI / compatible)
-├── rust_project.py     # Cargo project scaffolding, build, test, clippy
-├── test_harness.py     # Numerical accuracy harness
-├── benchmarker.py      # Wall-clock performance benchmarker
-├── reporter.py         # Markdown report generator
-├── cli.py              # Interactive CLI wizard
-└── strategies/
-    ├── base.py         # Abstract base class + ConversionResult
-    ├── llm_first.py    # Strategy 1
-    ├── agentic.py      # Strategy 2
-    └── hybrid.py       # Strategy 3
-
-convert.py              # Entry-point script
-requirements.txt
-setup.py
-```
-
----
-
 ## Development
 
 ```bash
