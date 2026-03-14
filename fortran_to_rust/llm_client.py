@@ -263,7 +263,8 @@ class LLMClient:
         system = (
             "You are an expert Fortran-to-Rust translator. "
             "Produce idiomatic, safe Rust code. "
-            "Use f64 for DOUBLE PRECISION, i32 for INTEGER, bool for LOGICAL. "
+            "Use f64 for DOUBLE PRECISION, i32 for INTEGER, bool for LOGICAL, "
+            "u8 for CHARACTER*1 (pass ASCII byte literals like b'N'). "
             "Fortran arrays are column-major and 1-indexed; convert to 0-indexed slices. "
             "INOUT array arguments become &mut [f64]. "
             "Replace DO loops with for loops. "
@@ -292,6 +293,7 @@ class LLMClient:
         system = (
             "You are an expert Rust developer. "
             "Fix the compilation errors in the provided Rust code. "
+            "Keep all Fortran CHARACTER*1 arguments typed as u8 (not char). "
             "Return ONLY the corrected Rust source — no markdown, no explanations."
         )
         messages = [

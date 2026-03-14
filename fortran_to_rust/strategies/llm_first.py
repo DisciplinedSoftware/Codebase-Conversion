@@ -111,7 +111,9 @@ class LLMFirstStrategy(ConversionStrategy):
         if routine.calls:
             parts.append(
                 "This routine calls: " + ", ".join(routine.calls) + ".\n"
-                "Common BLAS helpers: LSAME (character equality), XERBLA (error handler)."
+                "BLAS helpers use u8 for CHARACTER arguments: "
+                "`fn lsame(ca: u8, cb: u8) -> bool` (case-insensitive ASCII byte comparison), "
+                "`fn xerbla(srname: &str, info: i32)` (error handler)."
             )
         if routine.args:
             parts.append("Arguments: " + ", ".join(routine.args))

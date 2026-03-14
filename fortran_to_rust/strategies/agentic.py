@@ -97,6 +97,7 @@ class AgenticStrategy(ConversionStrategy):
                             "content": (
                                 "You are an expert Fortran-to-Rust translator. "
                                 "Revise only what the clarification affects. "
+                                "Keep all Fortran CHARACTER*1 arguments typed as u8 (not char). "
                                 "Return ONLY Rust source code."
                             ),
                         },
