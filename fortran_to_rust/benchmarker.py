@@ -173,6 +173,7 @@ def _run_fortran_bench(bench_src: str, extra_sources: List[Path]) -> Optional[fl
 
 _RUST_BENCH_TEMPLATE = """\
 // Auto-generated benchmark binary for `{fn_name}`
+#![allow(unused_mut, unused_variables, dead_code)]
 use std::time::Instant;
 
 fn main() {{

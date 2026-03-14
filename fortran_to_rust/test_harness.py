@@ -340,75 +340,108 @@ def generate_fortran_driver(
 
     For subroutines the output is the modified arrays/scalars.
     For functions (``routine_kind='function'``) the return value is captured and printed.
+
+    Uses a single ``random.Random(test_index)`` seeded RNG and iterates over
+    ``arg_names`` in order — the same strategy as ``_generate_rust_example`` — so
+    that both drivers receive identical numerical inputs.
     """
+    # Single shared RNG iterated in arg_names order, matching _generate_rust_example.
+    rng = random.Random(test_index)
+
+    # --- Collect grouped types for Fortran declarations ---
+    int_scalars = [n.upper() for n in arg_names
+                   if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_integer
+                   and not arg_decls[n.upper()].is_array]
+    dp_scalars = [n.upper() for n in arg_names
+                  if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_real
+                  and not arg_decls[n.upper()].is_array]
+    char_scalars = [n.upper() for n in arg_names
+                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_char
+                    and not arg_decls[n.upper()].is_array]
+    logical_scalars = [n.upper() for n in arg_names
+                       if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_logical
+                       and not arg_decls[n.upper()].is_array]
+    array_args = [(n.upper(), arg_decls[n.upper()])
+                  for n in arg_names
+                  if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_array
+                  and arg_decls[n.upper()].is_real]
+
     decl_lines: List[str] = []
+    loop_int_vars: List[str] = []
+
+    if int_scalars:
+        decl_lines.append("      INTEGER " + ", ".join(int_scalars))
+    if dp_scalars:
+        decl_lines.append("      DOUBLE PRECISION " + ", ".join(dp_scalars))
+    for arr_name, decl in array_args:
+        sizes = _array_size(decl, assigned_dims)
+        if sizes:
+            dim_str = ", ".join(str(s) for s in sizes)
+            decl_lines.append(f"      DOUBLE PRECISION {arr_name}({dim_str})")
+    if char_scalars:
+        decl_lines.append("      CHARACTER*1 " + ", ".join(char_scalars))
+    if logical_scalars:
+        decl_lines.append("      LOGICAL " + ", ".join(logical_scalars))
+
+    # --- Assignments and print loops in arg_names order (mirrors Rust RNG draws) ---
     assign_lines: List[str] = []
     print_lines: List[str] = []
 
-    # --- INTEGER scalars ---
-    int_scalars = [n for n, d in arg_decls.items() if d.is_integer and not d.is_array]
-    if int_scalars:
-        decl_lines.append("      INTEGER " + ", ".join(int_scalars))
-        for n in int_scalars:
-            assign_lines.append(f"      {n} = {assigned_dims.get(n, 4)}")
-
-    # --- DOUBLE PRECISION scalars ---
-    dp_scalars = [n for n, d in arg_decls.items() if d.is_real and not d.is_array]
-    if dp_scalars:
-        decl_lines.append("      DOUBLE PRECISION " + ", ".join(dp_scalars))
-        for i, n in enumerate(dp_scalars):
-            stmt = _fortran_scalar_init(n, arg_decls[n], seed_offset=test_index * 100 + i)
-            if stmt:
-                assign_lines.append(stmt)
-
-    # --- Real arrays ---
-    array_args = [(n, d) for n, d in arg_decls.items() if d.is_array and d.is_real]
-    loop_int_vars: List[str] = []
-    for arr_name, decl in array_args:
-        sizes = _array_size(decl, assigned_dims)
-        if not sizes:
+    for name in arg_names:
+        upper = name.upper()
+        decl = arg_decls.get(upper)
+        if decl is None:
             continue
-        dim_str = ", ".join(str(s) for s in sizes)
-        decl_lines.append(f"      DOUBLE PRECISION {arr_name}({dim_str})")
-        init = _fortran_array_init(arr_name, sizes, seed_offset=test_index * 1000 + ord(arr_name[0]))
-        if init:
-            assign_lines.append(init)
-        # Print loop for this array
-        iv = f"I{arr_name}"
-        jv = f"J{arr_name}"
-        if len(sizes) == 1:
-            loop_int_vars.append(iv)
-            print_lines += [
-                f"      DO {iv}=1,{sizes[0]}",
-                f"        WRITE(*,'(ES25.15)') {arr_name}({iv})",
-                f"      END DO",
-            ]
-        elif len(sizes) == 2:
-            loop_int_vars += [iv, jv]
-            print_lines += [
-                f"      DO {jv}=1,{sizes[1]}",
-                f"        DO {iv}=1,{sizes[0]}",
-                f"          WRITE(*,'(ES25.15)') {arr_name}({iv},{jv})",
-                f"        END DO",
-                f"      END DO",
-            ]
+        if decl.is_char and not decl.is_array:
+            assign_lines.append(f"      {upper} = 'N'")
+        elif decl.is_logical and not decl.is_array:
+            assign_lines.append(f"      {upper} = .FALSE.")
+        elif decl.is_integer and not decl.is_array:
+            assign_lines.append(f"      {upper} = {assigned_dims.get(upper, 4)}")
+        elif decl.is_real and not decl.is_array:
+            val = rng.uniform(0.5, 2.0)  # draw from shared rng (same as Rust)
+            assign_lines.append(f"      {upper} = {_f90_double(val)}")
+        elif decl.is_real and decl.is_array:
+            sizes = _array_size(decl, assigned_dims)
+            if not sizes:
+                continue
+            total = 1
+            for s in sizes:
+                total *= s
+            # Draw values from shared rng in the same order as Rust (flat, column-major)
+            vals = [rng.uniform(-1.0, 1.0) for _ in range(total)]
+            if len(sizes) == 1:
+                for i, v in enumerate(vals):
+                    assign_lines.append(f"      {upper}({i + 1}) = {_f90_double(v)}")
+                iv = f"I{upper}"
+                loop_int_vars.append(iv)
+                print_lines += [
+                    f"      DO {iv}=1,{sizes[0]}",
+                    f"        WRITE(*,'(ES25.15)') {upper}({iv})",
+                    f"      END DO",
+                ]
+            elif len(sizes) == 2:
+                n_rows = sizes[0]
+                # vals is column-major: vals[row + col*n_rows]
+                for col in range(sizes[1]):
+                    for row in range(sizes[0]):
+                        v = vals[col * n_rows + row]
+                        assign_lines.append(
+                            f"      {upper}({row + 1},{col + 1}) = {_f90_double(v)}"
+                        )
+                iv = f"I{upper}"
+                jv = f"J{upper}"
+                loop_int_vars += [iv, jv]
+                print_lines += [
+                    f"      DO {jv}=1,{sizes[1]}",
+                    f"        DO {iv}=1,{sizes[0]}",
+                    f"          WRITE(*,'(ES25.15)') {upper}({iv},{jv})",
+                    f"        END DO",
+                    f"      END DO",
+                ]
 
     if loop_int_vars:
         decl_lines.append("      INTEGER " + ", ".join(loop_int_vars))
-
-    # --- CHARACTER scalars ---
-    char_scalars = [n for n, d in arg_decls.items() if d.is_char and not d.is_array]
-    if char_scalars:
-        decl_lines.append("      CHARACTER*1 " + ", ".join(char_scalars))
-        for n in char_scalars:
-            assign_lines.append(f"      {n} = 'N'")
-
-    # --- LOGICAL scalars ---
-    logical_scalars = [n for n, d in arg_decls.items() if d.is_logical and not d.is_array]
-    if logical_scalars:
-        decl_lines.append("      LOGICAL " + ", ".join(logical_scalars))
-        for n in logical_scalars:
-            assign_lines.append(f"      {n} = .FALSE.")
 
     # DP scalars (ALPHA, BETA, …) are read-only inputs in BLAS; printing them
     # after CALL would cause length mismatches in the Rust comparison without
@@ -501,7 +534,8 @@ use {crate_name}::{fn_lower}::*;
 fn main() {{
 {rust_inputs}
 
-    {fn_lower}({call_args});
+    // Safety: the generated function may be declared unsafe if the LLM used raw pointers.
+    unsafe {{ {fn_lower}({call_args}); }}
 
     // Print outputs
 {rust_prints}
@@ -516,7 +550,8 @@ use {crate_name}::{fn_lower}::*;
 fn main() {{
 {rust_inputs}
 
-    let _result = {fn_lower}({call_args});
+    // Safety: the generated function may be declared unsafe if the LLM used raw pointers.
+    let _result = unsafe {{ {fn_lower}({call_args}) }};
 
     // Print return value
     println!("{{:.15e}}", _result as f64);
@@ -546,7 +581,7 @@ def _generate_rust_example(
     inputs: List[str] = []
     call_args: List[str] = []
     prints: List[str] = []
-    rng = random.Random(test_index * 100)
+    rng = random.Random(test_index)
 
     for name in arg_names:
         decl = arg_decls.get(name.upper(), ArgDecl(name=name.upper(), ftype="DOUBLE PRECISION", dims=[]))
