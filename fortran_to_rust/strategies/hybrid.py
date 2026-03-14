@@ -93,7 +93,7 @@ class HybridStrategy(ConversionStrategy):
             src.write_text(routine.source)
             try:
                 result = subprocess.run(
-                    ["f2c", "-R", "-!s", str(src)],
+                    ["f2c", "-R", str(src)],
                     capture_output=True,
                     text=True,
                     cwd=tmpdir,
