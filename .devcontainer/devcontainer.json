@@ -1,0 +1,58 @@
+{
+  "name": "Fortran-to-Rust Conversion",
+
+  // Build from our Dockerfile so gfortran, f2c, and Rust are pre-installed.
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+
+  // Run as the non-root "vscode" user that the base image ships with.
+  "remoteUser": "vscode",
+
+  // Mount the workspace and carry Cargo's registry cache across rebuilds.
+  "mounts": [
+    "source=codebase-conversion-cargo-cache,target=/home/vscode/.cargo/registry,type=volume",
+    "source=codebase-conversion-cargo-git,target=/home/vscode/.cargo/git,type=volume"
+  ],
+
+  // After the container is created, install the Python package in
+  // editable mode so `import fortran_to_rust` works out of the box.
+  "postCreateCommand": "pip install --no-cache-dir -e . 2>/dev/null || true",
+
+  // Keep a copy of the Rust toolchain fresh on every rebuild.
+  "postStartCommand": "rustup update stable --no-self-update 2>/dev/null || true",
+
+  // VS Code / GitHub Codespaces extensions
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.python"
+        },
+        "rust-analyzer.cargo.features": "all",
+        "editor.formatOnSave": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // Forward no ports by default; add entries here if you add a web UI later.
+  "forwardPorts": [],
+
+  // Environment variables available inside the container.
+  // Set LLM_API_KEY via a .env file or a Codespaces secret — never hardcode.
+  "containerEnv": {
+    "LLM_PROVIDER": "copilot"
+  }
+}
