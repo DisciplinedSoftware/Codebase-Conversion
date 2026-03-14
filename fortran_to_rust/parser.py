@@ -20,6 +20,7 @@ class FortranRoutine:
     calls: List[str] = field(default_factory=list)
     line_count: int = 0
     chunks: List[str] = field(default_factory=list)  # ≤200-line pieces
+    return_type: Optional[str] = None  # e.g. 'DOUBLE PRECISION' for typed functions
 
     def __post_init__(self) -> None:
         self.line_count = len(self.source.splitlines())
@@ -44,9 +45,20 @@ def _split_into_chunks(source: str, max_lines: int = 200) -> List[str]:
 _BLANK_OR_COMMENT = re.compile(r"^\s*$|^[Cc*!]")
 _CONTINUATION = re.compile(r"^     [^ ]")  # col 6 non-blank = continuation
 
-# Match SUBROUTINE or FUNCTION start
+# Match SUBROUTINE or FUNCTION start — handles optional return-type prefix such as
+# "DOUBLE PRECISION FUNCTION DDOT(...)" or "INTEGER FUNCTION IDAMAX(...)".
 _ROUTINE_START = re.compile(
-    r"^\s{0,6}(?:RECURSIVE\s+)?(?P<kind>SUBROUTINE|FUNCTION)\s+(?P<name>\w+)\s*\(",
+    r"^\s{0,6}"
+    r"(?:(?P<rtype>"
+    r"DOUBLE\s+PRECISION"
+    r"|REAL(?:\s*\*\s*\d+)?"
+    r"|INTEGER(?:\s*\*\s*\d+)?"
+    r"|LOGICAL"
+    r"|CHARACTER(?:\s*\*\s*\d+)?"
+    r"|COMPLEX(?:\s*\*\s*\d+)?"
+    r")\s+)?"
+    r"(?:RECURSIVE\s+)?"
+    r"(?P<kind>SUBROUTINE|FUNCTION)\s+(?P<name>\w+)\s*\(",
     re.IGNORECASE,
 )
 # Also match functions without parentheses (rare)
@@ -122,6 +134,10 @@ def parse_source(
         if m:
             kind = m.group("kind").lower()
             name = m.group("name").upper()
+            # Capture optional return type (e.g. "DOUBLE PRECISION" in
+            # "DOUBLE PRECISION FUNCTION DDOT(...)").
+            rtype_raw = m.group("rtype") if "rtype" in m.groupdict() else None
+            return_type = " ".join(rtype_raw.split()).upper() if rtype_raw else None
             start = i
             args = _extract_args(line)
             # Collect until END (or END SUBROUTINE / END FUNCTION)
@@ -141,6 +157,7 @@ def parse_source(
                 source_file=source_file,
                 args=args,
                 calls=calls,
+                return_type=return_type,
             )
             routines.append(routine)
         else:

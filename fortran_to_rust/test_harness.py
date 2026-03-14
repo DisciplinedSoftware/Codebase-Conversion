@@ -251,6 +251,33 @@ def _fortran_call(routine_name: str, arg_names: List[str]) -> str:
     return "\n".join(lines)
 
 
+def _fortran_assign_call(result_var: str, routine_name: str, arg_names: List[str]) -> str:
+    """Generate a Fortran-77 assignment call: RESULT = FUNC(args)."""
+    prefix = "      "
+    cont   = "     +"
+    max_w  = 65
+
+    full = f"{result_var} = {routine_name}({', '.join(arg_names)})"
+    if len(full) <= max_w:
+        return prefix + full
+
+    lines: List[str] = []
+    current = f"{result_var} = {routine_name}("
+    for i, arg in enumerate(arg_names):
+        is_last = i == len(arg_names) - 1
+        sep = "" if current.endswith("(") else ", "
+        closing = ")" if is_last else ""
+        candidate = current + sep + arg + closing
+        if len(candidate) <= max_w or current.endswith("("):
+            current = candidate
+        else:
+            lines.append((prefix if not lines else cont) + current + ",")
+            current = arg + closing
+    if current:
+        lines.append((prefix if not lines else cont) + current)
+    return "\n".join(lines)
+
+
 def _fortran_scalar_init(name: str, decl: ArgDecl, seed_offset: int) -> str:
     """Return a Fortran assignment statement for a scalar argument."""
     rng = random.Random(seed_offset)
@@ -306,8 +333,14 @@ def generate_fortran_driver(
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
     test_index: int = 0,
+    routine_kind: str = "subroutine",
+    return_ftype: str = "DOUBLE PRECISION",
 ) -> str:
-    """Build a complete Fortran PROGRAM that calls *routine_name* and prints its outputs."""
+    """Build a complete Fortran PROGRAM that calls *routine_name* and prints its outputs.
+
+    For subroutines the output is the modified arrays/scalars.
+    For functions (``routine_kind='function'``) the return value is captured and printed.
+    """
     decl_lines: List[str] = []
     assign_lines: List[str] = []
     print_lines: List[str] = []
@@ -377,11 +410,34 @@ def generate_fortran_driver(
         for n in logical_scalars:
             assign_lines.append(f"      {n} = .FALSE.")
 
-    # Print DP scalars after the CALL (outputs may have been updated)
-    for n in dp_scalars:
-        print_lines.append(f"      WRITE(*,'(ES25.15)') {n}")
+    # DP scalars (ALPHA, BETA, …) are read-only inputs in BLAS; printing them
+    # after CALL would cause length mismatches in the Rust comparison without
+    # testing the conversion. For functions the return value is printed via
+    # result_var (handled below).
 
-    call_stmt = _fortran_call(routine_name.upper(), arg_names)
+    # --- Handle FUNCTION vs SUBROUTINE call ---
+    if routine_kind == "function":
+        result_var = f"RES_{routine_name.upper()[:6]}"
+        ftype_upper = return_ftype.strip().upper()
+        # Map return type to a Fortran type declaration
+        if "INTEGER" in ftype_upper:
+            ftype_decl = "INTEGER"
+            print_fmt  = "(I20)"
+        elif "LOGICAL" in ftype_upper:
+            ftype_decl = "LOGICAL"
+            print_fmt  = "(L5)"
+        else:
+            ftype_decl = "DOUBLE PRECISION"
+            print_fmt  = "(ES25.15)"
+        # Declare the result variable, the function type, and EXTERNAL
+        decl_lines.append(f"      {ftype_decl} {result_var}")
+        decl_lines.append(f"      {ftype_decl} {routine_name.upper()}")
+        decl_lines.append(f"      EXTERNAL {routine_name.upper()}")
+        call_stmt = _fortran_assign_call(result_var, routine_name.upper(), arg_names)
+        # Print the function result after all array prints
+        print_lines.append(f"      WRITE(*,'{print_fmt}') {result_var}")
+    else:
+        call_stmt = _fortran_call(routine_name.upper(), arg_names)
 
     parts = [
         _FORTRAN_DRIVER_HEADER.format(name=routine_name.upper()),
@@ -437,21 +493,35 @@ def _compile_run_fortran(
 # Rust example generation and execution
 # ---------------------------------------------------------------------------
 
-_RUST_EXAMPLE_TEMPLATE = """\
+_RUST_EXAMPLE_TEMPLATE_SUB = """\
 // Auto-generated accuracy test binary for `{fn_name}`
-// Calls the converted Rust function with the same inputs as the Fortran reference
-// and prints every f64 output value (one per line).
+#[allow(unused_imports)]
+use {crate_name}::{fn_lower}::*;
 
 fn main() {{
-    // NOTE: Uncomment and adjust the call once the Rust signature is confirmed.
-    // use {crate_name}::{fn_lower}::*;
-
 {rust_inputs}
 
-    // Call the converted function (uncomment once signature is known):
-    // {fn_lower}({call_args});
+    {fn_lower}({call_args});
 
     // Print outputs
+{rust_prints}
+}}
+"""
+
+_RUST_EXAMPLE_TEMPLATE_FN = """\
+// Auto-generated accuracy test binary for `{fn_name}`
+#[allow(unused_imports)]
+use {crate_name}::{fn_lower}::*;
+
+fn main() {{
+{rust_inputs}
+
+    let _result = {fn_lower}({call_args});
+
+    // Print return value
+    println!("{{:.15e}}", _result as f64);
+
+    // Print any array outputs
 {rust_prints}
 }}
 """
@@ -464,6 +534,8 @@ def _generate_rust_example(
     assigned_dims: Dict[str, int],
     crate_dir: Path,
     test_index: int = 0,
+    routine_kind: str = "subroutine",
+    return_ftype: str = "DOUBLE PRECISION",
 ) -> bool:
     """Write a Rust example binary that mirrors the Fortran test driver."""
     fn_lower = routine_name.lower()
@@ -507,13 +579,14 @@ def _generate_rust_example(
             inputs.append(f"    let mut {rname}: f64 = 0.0;")
             call_args.append(f"&mut {rname}")
 
-    rust_src = _RUST_EXAMPLE_TEMPLATE.format(
+    template = _RUST_EXAMPLE_TEMPLATE_FN if routine_kind == "function" else _RUST_EXAMPLE_TEMPLATE_SUB
+    rust_src = template.format(
         fn_name=routine_name,
         fn_lower=fn_lower,
         crate_name=crate_name,
         rust_inputs="\n".join(inputs),
         call_args=", ".join(call_args),
-        rust_prints="\n".join(prints) if prints else "    // no array outputs detected",
+        rust_prints="\n".join(prints) if prints else "    // no array outputs",
     )
     (examples_dir / f"accuracy_{fn_lower}.rs").write_text(rust_src)
     return True
@@ -597,20 +670,31 @@ def run_accuracy_check(
     errors: List[float] = []
     details: List[str] = []
     failed = 0
+    fortran_ok_count = 0  # explicit counter — avoids fragile string matching
+
+    routine_kind   = getattr(routine, "kind", "subroutine")
+    return_ftype   = getattr(routine, "return_type", None) or "DOUBLE PRECISION"
 
     for t in range(num_tests):
-        driver = generate_fortran_driver(fn, arg_names, arg_decls, assigned_dims, test_index=t)
+        driver = generate_fortran_driver(
+            fn, arg_names, arg_decls, assigned_dims, test_index=t,
+            routine_kind=routine_kind, return_ftype=return_ftype,
+        )
         fortran_out = _compile_run_fortran(driver, extra_sources)
 
         if fortran_out is None:
             details.append(f"  Test {t+1}: Fortran reference failed to compile/run.")
             continue
 
+        fortran_ok_count += 1
         details.append(f"  Test {t+1}: Fortran reference produced {len(fortran_out)} value(s).")
 
         rust_out: Optional[List[float]] = None
         if crate_dir and crate_dir.exists():
-            _generate_rust_example(fn, arg_names, arg_decls, assigned_dims, crate_dir, t)
+            _generate_rust_example(
+                fn, arg_names, arg_decls, assigned_dims, crate_dir, t,
+                routine_kind=routine_kind, return_ftype=return_ftype,
+            )
             rust_out = _compile_run_rust_example(crate_dir, fn)
 
         if rust_out and len(rust_out) == len(fortran_out) and fortran_out:
@@ -623,6 +707,11 @@ def run_accuracy_check(
             details.append(
                 f"  Test {t+1}: max_abs_error={max_e:.2e} {'OK' if ok else 'FAIL'}"
             )
+        elif rust_out is not None:
+            details.append(
+                f"  Test {t+1}: Rust produced {len(rust_out)} value(s) vs "
+                f"Fortran {len(fortran_out)} — length mismatch, comparison skipped."
+            )
         else:
             details.append(
                 f"  Test {t+1}: Rust binary not available -- "
@@ -630,14 +719,17 @@ def run_accuracy_check(
             )
 
     if not errors:
+        msg = (
+            "Fortran reference ran successfully. "
+            "No Rust binary available for numerical comparison."
+            if fortran_ok_count > 0
+            else "No tests completed successfully."
+        )
         return AccuracyResult(
             function_name=fn,
-            passed=True,
+            passed=fortran_ok_count > 0,
             num_test_cases=num_tests,
-            error_message=(
-                "Fortran reference ran successfully. "
-                "No Rust binary available for numerical comparison."
-            ),
+            error_message=msg,
             details=details,
         )
 

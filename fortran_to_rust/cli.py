@@ -38,13 +38,16 @@ from fortran_to_rust.test_harness import run_accuracy_check
 
 console = Console()
 
-_BANNER = """
-[bold cyan] ___         _                   _          ___          _[/bold cyan]
-[bold cyan]| __|__ _ __| |_ _ _ __ _ _ _  | |_ ___   | _ \\  _ ___ | |_[/bold cyan]
-[bold cyan]| _/ _ \\ '__  _| '_/ _` | ' \\ |  _/ _ \\  |   / || (_-< |  _|[/bold cyan]
-[bold cyan]|_|\\___/_|   |_||_| \\__,_|_||_| \\__\\___/  |_|_\\ \\_,_/__/  \\__|[/bold cyan]
-[dim]Fortran → Rust  •  Automated Conversion Pipeline  •  v0.1.0[/dim]
-"""
+
+def _print_banner() -> None:
+    """Print the application banner in a clean, reliably-rendered Panel."""
+    from rich.panel import Panel
+    from rich.text import Text
+
+    title = Text.assemble(("Fortran", "bold cyan"), (" → ", "bold white"), ("Rust", "bold cyan"))
+    subtitle = Text("Automated Conversion Pipeline  •  v0.1.0", style="dim")
+    content = Text.assemble(title, "\n", subtitle)
+    console.print(Panel(content, border_style="cyan", padding=(1, 4), expand=False))
 
 _STRATEGY_DESCRIPTIONS = {
     "1": (
@@ -71,7 +74,7 @@ _STRATEGY_DESCRIPTIONS = {
 
 def run(output_dir: Path) -> None:
     """Launch the interactive conversion wizard."""
-    console.print(_BANNER)
+    _print_banner()
     console.print(Rule(style="cyan"))
 
     # --- 1. Library selection -----------------------------------------------
@@ -188,10 +191,11 @@ def run(output_dir: Path) -> None:
         build_ok=build_ok,
         test_ok=test_ok,
     )
-    console.print(f"  [green]✓[/green] Report written to [bold]{report_path}[/bold]")
+    md_path, html_path = report_path
+    console.print(f"  [green]✓[/green] Report written to [bold]{html_path}[/bold]")
 
     # --- 11. Final summary ----------------------------------------------------
-    _print_final_summary(conversion_results, accuracy_results, bench_results, report_path)
+    _print_final_summary(conversion_results, accuracy_results, bench_results, html_path)
 
 
 # ---------------------------------------------------------------------------

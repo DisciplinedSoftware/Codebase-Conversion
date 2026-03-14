@@ -251,7 +251,7 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
 
     # --- 8. Report ---
     console.print("\n[bold]Generating report…[/bold]")
-    report_path = generate_report(
+    md_path, html_path = generate_report(
         output_dir=output_dir,
         library="BLAS",
         strategy_name=STRATEGY_NAMES[strategy_key],
@@ -262,7 +262,8 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
         build_ok=build_ok,
         test_ok=test_ok,
     )
-    console.print(f"  [green]Report:[/green] {report_path}")
+    console.print(f"  [green]Markdown:[/green]  {md_path}")
+    console.print(f"  [green]HTML:[/green]      {html_path}")
     console.print(Rule(style="cyan"))
 
 
