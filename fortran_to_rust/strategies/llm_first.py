@@ -67,6 +67,7 @@ class LLMFirstStrategy(ConversionStrategy):
             return result
 
         rust_source = _strip_fences(rust_source)
+        rust_source = _ensure_top_level_pub_fn(rust_source, routine.name.lower())
 
         # Compile + repair loop
         errors: list[str] = []
@@ -87,6 +88,7 @@ class LLMFirstStrategy(ConversionStrategy):
                     rust_source = _strip_fences(
                         self.llm.repair_rust(rust_source, compiler_output, routine.name)
                     )
+                    rust_source = _ensure_top_level_pub_fn(rust_source, routine.name.lower())
                 except Exception as exc:
                     cb(f"  [red]LLM repair failed: {exc}[/red]")
                     break
@@ -135,3 +137,32 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```(?:rust)?\s*\n?", "", text.strip(), flags=re.MULTILINE)
     text = re.sub(r"\n?```\s*$", "", text.strip(), flags=re.MULTILINE)
     return text.strip()
+
+
+def _ensure_top_level_pub_fn(source: str, fn_name: str) -> str:
+    """Ensure *fn_name* is declared ``pub`` at the top level of the source.
+
+    Handles the two most common LLM mistakes:
+    1. Function is defined without ``pub`` → adds ``pub``.
+    2. Function is already ``pub`` → no-op.
+
+    Does NOT attempt to unwrap functions nested inside ``mod`` blocks; the LLM
+    prompt explicitly forbids that, so it should be uncommon.
+    """
+    # Already correct: pub fn / pub unsafe fn at the start of a line (top-level)
+    if re.search(
+        rf"^pub\s+(?:unsafe\s+)?fn\s+{re.escape(fn_name)}\b",
+        source,
+        re.MULTILINE,
+    ):
+        return source
+    # Missing pub: plain fn {fn_name} at start of a line — add pub
+    fixed, n = re.subn(
+        rf"^fn\s+{re.escape(fn_name)}\b",
+        f"pub fn {fn_name}",
+        source,
+        flags=re.MULTILINE,
+    )
+    if n > 0:
+        return fixed
+    return source

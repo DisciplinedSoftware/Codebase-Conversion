@@ -67,6 +67,8 @@ def scaffold_crate(
         mod_file = src_dir / f"{mod_name}.rs"
         mod_file.write_text(src)
         lib_parts.append(f"pub mod {mod_name};")
+        # Flat re-export so accuracy examples can `use {crate_name}::*`
+        lib_parts.append(f"pub use {mod_name}::*;")
 
     lib_parts.append("")  # trailing newline
     (src_dir / "lib.rs").write_text("\n".join(lib_parts))

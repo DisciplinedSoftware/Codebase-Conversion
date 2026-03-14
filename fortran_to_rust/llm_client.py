@@ -260,9 +260,12 @@ class LLMClient:
         extra_context: str = "",
     ) -> str:
         """Single-shot translation prompt."""
+        fn_lower = function_name.lower()
         system = (
             "You are an expert Fortran-to-Rust translator. "
             "Produce idiomatic, safe Rust code. "
+            f"The output MUST contain a top-level `pub fn {fn_lower}(...)` or "
+            f"`pub unsafe fn {fn_lower}(...)` — do NOT wrap it inside any `mod` block. "
             "Use f64 for DOUBLE PRECISION, i32 for INTEGER, bool for LOGICAL, "
             "u8 for CHARACTER*1 (pass ASCII byte literals like b'N'). "
             "Fortran arrays are column-major and 1-indexed; convert to 0-indexed slices. "
@@ -290,10 +293,13 @@ class LLMClient:
         function_name: str,
     ) -> str:
         """Feed compiler errors back to the LLM and ask for a fix."""
+        fn_lower = function_name.lower()
         system = (
             "You are an expert Rust developer. "
             "Fix the compilation errors in the provided Rust code. "
             "Keep all Fortran CHARACTER*1 arguments typed as u8 (not char). "
+            f"Ensure the function is declared as a top-level `pub fn {fn_lower}(...)` or "
+            f"`pub unsafe fn {fn_lower}(...)` — do NOT move it inside a `mod` block. "
             "Return ONLY the corrected Rust source — no markdown, no explanations."
         )
         messages = [

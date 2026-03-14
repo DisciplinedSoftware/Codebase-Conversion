@@ -529,7 +529,7 @@ def _compile_run_fortran(
 _RUST_EXAMPLE_TEMPLATE_SUB = """\
 // Auto-generated accuracy test binary for `{fn_name}`
 #[allow(unused_imports)]
-use {crate_name}::{fn_lower}::*;
+use {crate_name}::*;
 
 fn main() {{
 {rust_inputs}
@@ -545,7 +545,7 @@ fn main() {{
 _RUST_EXAMPLE_TEMPLATE_FN = """\
 // Auto-generated accuracy test binary for `{fn_name}`
 #[allow(unused_imports)]
-use {crate_name}::{fn_lower}::*;
+use {crate_name}::*;
 
 fn main() {{
 {rust_inputs}
