@@ -253,6 +253,18 @@ class LLMClient:
 
         raise LLMError(f"LLM request failed after {retry + 1} attempts: {last_exc}") from last_exc
 
+    @staticmethod
+    def _strip_code_fence(text: str) -> str:
+        """Remove markdown code fences that LLMs sometimes add despite instructions."""
+        text = text.strip()
+        # Remove opening fence: ```rust or ``` or ```python etc.
+        if text.startswith("```"):
+            text = text[text.index("\n") + 1:] if "\n" in text else text[3:]
+        # Remove closing fence
+        if text.endswith("```"):
+            text = text[: text.rfind("```")].rstrip()
+        return text
+
     def translate_fortran_to_rust(
         self,
         fortran_source: str,
@@ -284,7 +296,7 @@ class LLMClient:
             {"role": "system", "content": system},
             {"role": "user", "content": "\n".join(user_parts)},
         ]
-        return self.chat(messages)
+        return self._strip_code_fence(self.chat(messages))
 
     def repair_rust(
         self,
@@ -314,7 +326,7 @@ class LLMClient:
                 ),
             },
         ]
-        return self.chat(messages)
+        return self._strip_code_fence(self.chat(messages))
 
     def ask_clarification(
         self,
@@ -347,7 +359,7 @@ class LLMClient:
             "Replace raw pointer arithmetic with slice indexing. "
             "Replace unsafe blocks with safe Rust idioms where semantically equivalent. "
             "Preserve correctness exactly. "
-            "Return ONLY the Rust source code."
+            "Return ONLY the Rust source code — no markdown fences, no explanations."
         )
         messages = [
             {"role": "system", "content": system},
@@ -359,5 +371,5 @@ class LLMClient:
                 ),
             },
         ]
-        return self.chat(messages)
+        return self._strip_code_fence(self.chat(messages))
 
