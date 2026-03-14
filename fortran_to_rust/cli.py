@@ -244,6 +244,11 @@ def _fetch_and_select(
         wanted = [f.lower() for f in BLAS_FUNCTIONS]
         console.print(f"  Will convert all {len(wanted)} BLAS functions.")
 
+    # Always fetch the BLAS support routines so that the Fortran compiler
+    # can link functions that call LSAME / XERBLA (e.g. DGEMM).
+    _SUPPORT_FNS = ["lsame", "xerbla"]
+    fetch_list = list(dict.fromkeys(wanted + _SUPPORT_FNS))
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -254,11 +259,13 @@ def _fetch_and_select(
         task = progress.add_task("Fetching source files…", total=None)
         source_map = fetch_blas(
             output_dir,
-            functions=wanted,
+            functions=fetch_list,
             progress_callback=lambda msg: progress.update(task, description=msg),
         )
 
-    found = sorted(source_map.keys())
+    # Only expose user-selected functions as conversion targets
+    wanted_set = set(wanted)
+    found = sorted(k for k in source_map if k in wanted_set)
     missing = [f for f in wanted if f not in source_map]
     console.print(f"\n  [green]✓[/green] {len(found)} source file(s) ready.")
     if missing:
