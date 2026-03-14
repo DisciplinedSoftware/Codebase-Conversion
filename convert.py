@@ -101,11 +101,25 @@ def _parse_functions_arg(raw: str) -> list[str]:
     raw = raw.strip()
     try:
         n = int(raw)
-        n = max(1, min(n, len(BLAS_FUNCTIONS)))
+        if n > len(BLAS_FUNCTIONS):
+            print(
+                f"Warning: requested {n} functions but only "
+                f"{len(BLAS_FUNCTIONS)} are known; using all {len(BLAS_FUNCTIONS)}."
+            )
+            n = len(BLAS_FUNCTIONS)
+        n = max(1, n)
         return [f.lower() for f in BLAS_FUNCTIONS[:n]]
     except ValueError:
         pass
     return [name.strip().lower() for name in raw.split(",") if name.strip()]
+
+
+def _make_progress_callback(fn_name: str, messages: list[str], console):  # type: ignore[type-arg]
+    """Return a progress callback that tags messages with *fn_name*."""
+    def cb(msg: str) -> None:
+        console.print(f"  [{fn_name}] {msg}")
+        messages.append(msg)
+    return cb
 
 
 def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str) -> None:
@@ -181,9 +195,7 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
             continue
 
         messages: list[str] = []
-        def cb(msg: str, _fn=fn) -> None:  # noqa: E731
-            console.print(f"  [{_fn}] {msg}")
-            messages.append(msg)
+        cb = _make_progress_callback(fn, messages, console)
 
         result = strategy.convert(routine, progress_callback=cb)
         conversion_results.append(result)
