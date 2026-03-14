@@ -130,7 +130,9 @@ def _run_non_interactive(output_dir: Path) -> None:
 
     # 5. Accuracy
     console.print("[bold]Accuracy check…[/bold]")
-    acc = run_accuracy_check("dgemm", source_map["dgemm"], crate_dir if build_ok else None)
+    acc = run_accuracy_check(
+        "dgemm", source_map["dgemm"], crate_dir if build_ok else None, routine=routine
+    )
     console.print(
         f"  Accuracy: {'✅ passed' if acc.passed else '⚠ see report'}"
         + (f"  max_err={acc.max_abs_error:.2e}" if acc.max_abs_error else "")
@@ -138,7 +140,9 @@ def _run_non_interactive(output_dir: Path) -> None:
 
     # 6. Benchmark
     console.print("[bold]Benchmarking…[/bold]")
-    bench = run_benchmark("dgemm", source_map["dgemm"], crate_dir if build_ok else None)
+    bench = run_benchmark(
+        "dgemm", source_map["dgemm"], crate_dir if build_ok else None, routine=routine
+    )
     console.print(f"  {bench.summary}")
 
     # 7. Report

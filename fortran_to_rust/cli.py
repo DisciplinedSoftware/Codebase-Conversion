@@ -27,7 +27,6 @@ from fortran_to_rust.benchmarker import run_benchmark
 from fortran_to_rust.call_graph import build_call_graph, render_graph
 from fortran_to_rust.fetcher import (
     BLAS_FUNCTIONS,
-    BLAS_SAMPLE,
     fetch_blas,
 )
 from fortran_to_rust.llm_client import LLMClient, LLMUnavailableError
@@ -103,6 +102,9 @@ def run(output_dir: Path) -> None:
     graph = build_call_graph(all_routines)
     console.print(f"  [dim]Call graph:[/dim]\n{render_graph(graph)}")
 
+    # Build a lookup map: fn_name (upper) → FortranRoutine
+    routine_map = {r.name.upper(): r for r in all_routines}
+
     # --- 6. Convert -----------------------------------------------------------
     console.print()
     console.print(Panel("[bold]Step 4 — Converting Fortran → Rust[/bold]", style="cyan"))
@@ -111,11 +113,10 @@ def run(output_dir: Path) -> None:
     conversion_results = []
 
     for fn_name in functions_to_convert:
-        routines = [r for r in all_routines if r.name.upper() == fn_name.upper()]
-        if not routines:
+        routine = routine_map.get(fn_name.upper())
+        if not routine:
             console.print(f"  [yellow]⚠[/yellow] {fn_name}: no parsed routine found, skipping.")
             continue
-        routine = routines[0]
 
         console.print()
         console.print(f"  [bold cyan]Converting:[/bold cyan] {fn_name}  "
@@ -153,7 +154,10 @@ def run(output_dir: Path) -> None:
     accuracy_results = []
     for fn_name in functions_to_convert:
         src_path = source_map.get(fn_name.lower())
-        acc = run_accuracy_check(fn_name, src_path, crate_dir if build_ok else None)
+        routine = routine_map.get(fn_name.upper())
+        acc = run_accuracy_check(
+            fn_name, src_path, crate_dir if build_ok else None, routine=routine
+        )
         accuracy_results.append(acc)
         _show_accuracy(acc)
 
@@ -163,7 +167,8 @@ def run(output_dir: Path) -> None:
     bench_results = []
     for fn_name in functions_to_convert:
         src_path = source_map.get(fn_name.lower())
-        br = run_benchmark(fn_name, src_path, crate_dir if build_ok else None)
+        routine = routine_map.get(fn_name.upper())
+        br = run_benchmark(fn_name, src_path, crate_dir if build_ok else None, routine=routine)
         bench_results.append(br)
         console.print(f"  {br.summary}")
         for d in br.details:
@@ -212,7 +217,7 @@ def _fetch_and_select(
     """Download sources and ask the user what to convert."""
     console.print("\n[bold]What would you like to convert?[/bold]")
     console.print("  [cyan]1[/cyan]  Single function  (you choose which one)")
-    console.print("  [cyan]2[/cyan]  Sample of 10 functions  (dgemm + 9 others)")
+    console.print("  [cyan]2[/cyan]  Custom sample  (comma-separated names OR a sample size, default 10)")
     console.print(f"  [cyan]3[/cyan]  Full library  ({len(BLAS_FUNCTIONS)} functions)")
 
     scope = Prompt.ask("\n[bold cyan]>[/bold cyan] Scope", choices=["1", "2", "3"], default="1")
@@ -224,7 +229,12 @@ def _fetch_and_select(
         ).strip().lower()
         wanted = [fn]
     elif scope == "2":
-        wanted = [f.lower() for f in BLAS_SAMPLE]
+        raw = Prompt.ask(
+            "\n[bold cyan]>[/bold cyan] "
+            "Function names (comma-separated) OR sample size",
+            default="10",
+        ).strip()
+        wanted = _parse_sample_input(raw)
         console.print(f"  Selected: {', '.join(wanted)}")
     else:
         wanted = [f.lower() for f in BLAS_FUNCTIONS]
@@ -251,6 +261,34 @@ def _fetch_and_select(
         console.print(f"  [yellow]⚠[/yellow] Could not fetch: {', '.join(missing)}")
 
     return found, source_map
+
+
+def _parse_sample_input(raw: str) -> List[str]:
+    """Parse the sample scope input.
+
+    Accepts either:
+    - a plain integer → pick that many functions from the default list
+    - a comma-separated list of names → use exactly those functions
+    """
+    raw = raw.strip()
+    # If it looks like an integer, treat it as a sample size
+    try:
+        n = int(raw)
+        n = max(1, min(n, len(BLAS_FUNCTIONS)))
+        return [f.lower() for f in BLAS_FUNCTIONS[:n]]
+    except ValueError:
+        pass
+    # Otherwise treat as a comma-separated list of function names
+    names = [name.strip().lower() for name in raw.split(",") if name.strip()]
+    # Validate: warn about unknown names but keep them so the user sees the error
+    known = {f.lower() for f in BLAS_FUNCTIONS}
+    for name in names:
+        if name not in known:
+            console.print(
+                f"  [yellow]⚠[/yellow] '{name}' is not in the known BLAS function list — "
+                "will attempt to fetch anyway."
+            )
+    return names if names else [f.lower() for f in BLAS_FUNCTIONS[:10]]
 
 
 def _ask_strategy() -> str:
