@@ -107,12 +107,25 @@ python convert.py --output-dir /tmp/output   # custom output directory
 
 ## LLM configuration
 
-Set one of the following in your environment or a `.env` file in the repo root:
+The pipeline uses the **GitHub Models API** (`https://models.inference.ai.azure.com`) by
+default — the supported public API path for application code.  A GitHub Personal Access
+Token is the only credential required; no Copilot subscription or token exchange is needed.
+
+### Quickest setup — GitHub CLI
 
 ```bash
-# GitHub Copilot (default; token auto-detected from VS Code credential store)
-LLM_PROVIDER=copilot
-LLM_API_KEY=<your-github-oauth-token>
+gh auth login          # authenticate once
+python convert.py      # the pipeline automatically calls `gh auth token`
+                       # internally to discover your GitHub token
+```
+
+### Alternative — `.env` file
+
+Create a `.env` file in the repo root (it is `.gitignore`d — **never commit keys**):
+
+```bash
+# GitHub Models (default provider)
+LLM_API_KEY=<your-github-pat>
 
 # OpenAI
 LLM_PROVIDER=openai
@@ -124,8 +137,6 @@ LLM_BASE_URL=http://localhost:11434/v1/chat/completions
 LLM_API_KEY=<optional>
 LLM_MODEL=llama3
 ```
-
-The `.env` file is listed in `.gitignore` — **never commit API keys**.
 
 ---
 

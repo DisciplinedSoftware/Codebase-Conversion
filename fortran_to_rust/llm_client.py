@@ -1,28 +1,27 @@
 """LLM API client.
 
 Supports:
-  - GitHub Copilot  (https://api.githubcopilot.com/chat/completions)
-  - OpenAI          (https://api.openai.com/v1/chat/completions)
+  - GitHub Models  (https://models.inference.ai.azure.com — default)
+  - OpenAI         (https://api.openai.com/v1/chat/completions)
   - Any OpenAI-compatible endpoint (e.g. Ollama, LM Studio)
 
 Configuration is read from environment variables (and from a ``.env`` file
 in the current working directory, which is loaded automatically):
 
-    LLM_PROVIDER   = "copilot" | "openai" | "openai_compatible"  (default: copilot)
-    LLM_API_KEY    = bearer token / API key
+    LLM_PROVIDER   = "github_models" | "openai" | "openai_compatible"  (default: github_models)
+    LLM_API_KEY    = GitHub PAT / OpenAI API key / custom bearer token
     LLM_BASE_URL   = base URL for openai_compatible provider
-    LLM_MODEL      = model name override
+    LLM_MODEL      = model name override  (default: gpt-4o)
 
-GitHub Copilot authentication is resolved in this order:
-1. ``LLM_API_KEY`` environment variable (or ``.env`` file).
+GitHub Models authentication is resolved in this order:
+1. ``LLM_API_KEY`` environment variable (or ``.env`` file in the project root).
 2. ``gh auth token`` — the GitHub CLI token (works after ``gh auth login``).
-3. ``~/.config/github-copilot/hosts.json`` — VS Code credential store.
+3. ``~/.config/github-copilot/hosts.json`` — VS Code / Copilot credential store.
 
-When using the Copilot provider, a raw GitHub OAuth / PAT token (formats
-``gho_``, ``ghp_``, ``github_pat_``) is automatically exchanged for a
-short-lived Copilot API token using the public exchange endpoint
-``https://api.github.com/copilot_internal/v2/token``.  The exchanged token
-is cached in-process and refreshed before it expires.
+GitHub Models (``https://models.inference.ai.azure.com``) is the supported
+public API for application code.  It accepts a raw GitHub Personal Access
+Token or the OAuth token obtained via ``gh auth login`` — no token exchange
+or Copilot subscription is required.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ import json
 import os
 import subprocess
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,18 +38,11 @@ import requests
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_COPILOT_ENDPOINT = "https://api.githubcopilot.com/chat/completions"
-_COPILOT_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
+_GITHUB_MODELS_ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
 _OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
-_DEFAULT_MODEL_COPILOT = "gpt-4o"
-_DEFAULT_MODEL_OPENAI = "gpt-4o"
+_DEFAULT_MODEL = "gpt-4o"
 _REQUEST_TIMEOUT = 120  # seconds
 _GH_CLI_TIMEOUT = 8  # seconds — gh auth token should respond quickly
-_TOKEN_REFRESH_BUFFER = 90  # seconds — refresh Copilot token this early before expiry
-_DEFAULT_TOKEN_EXPIRY_SECONDS = 25 * 60  # fallback when exchange response has no expires_at
-
-# GitHub token prefixes that need to be exchanged for a Copilot API token
-_GITHUB_TOKEN_PREFIXES = ("gho_", "ghp_", "ghu_", "ghs_", "github_pat_", "v1.")
 
 
 class LLMError(Exception):
@@ -115,8 +106,14 @@ def _load_token_from_gh_cli() -> Optional[str]:
     return None
 
 
-def _load_copilot_token_from_vscode() -> Optional[str]:
-    """Try to read the GitHub OAuth token from the VS Code / Copilot store."""
+def _load_token_from_vscode_store() -> Optional[str]:
+    """Try to read the GitHub OAuth token from the VS Code / Copilot credential store.
+
+    The file ``~/.config/github-copilot/hosts.json`` is written by both the
+    GitHub Copilot VS Code extension and the ``gh`` CLI when you run
+    ``gh auth login --web``.  The token stored there is a standard GitHub
+    OAuth token that can be used with any GitHub API, including GitHub Models.
+    """
     candidates = [
         Path.home() / ".config" / "github-copilot" / "hosts.json",
         Path.home() / "AppData" / "Roaming" / "GitHub Copilot" / "hosts.json",
@@ -134,101 +131,22 @@ def _load_copilot_token_from_vscode() -> Optional[str]:
     return None
 
 
-def _is_raw_github_token(token: str) -> bool:
-    """Return True if *token* looks like a GitHub OAuth / PAT that needs exchange."""
-    return any(token.startswith(p) for p in _GITHUB_TOKEN_PREFIXES)
-
-
-# ---------------------------------------------------------------------------
-# Copilot token exchange + cache
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _CopilotToken:
-    """A short-lived Copilot API token with its expiry timestamp."""
-    token: str
-    expires_at: float  # Unix timestamp (seconds)
-
-    @property
-    def is_valid(self) -> bool:
-        # Refresh this many seconds before expiry so we never hit the API with a stale token
-        return time.time() < self.expires_at - _TOKEN_REFRESH_BUFFER
-
-
-# Module-level cache: github_token → exchanged CopilotToken
-_copilot_token_cache: Dict[str, _CopilotToken] = {}
-
-
-def _exchange_for_copilot_token(github_token: str) -> Optional[str]:
-    """Exchange a GitHub OAuth / PAT for a short-lived Copilot API token.
-
-    Returns the Copilot API token string, or *None* on failure.
-    The result is cached in-process and reused until near expiry.
-    """
-    cached = _copilot_token_cache.get(github_token)
-    if cached and cached.is_valid:
-        return cached.token
-
-    try:
-        resp = requests.get(
-            _COPILOT_EXCHANGE_URL,
-            headers={
-                "Authorization": f"token {github_token}",
-                "Accept": "application/json",
-            },
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            copilot_token = data.get("token")
-            # expires_at is an ISO-8601 string; fall back to 25 minutes from now
-            raw_exp = data.get("expires_at", "")
-            try:
-                from datetime import datetime, timezone
-                expires_at = datetime.fromisoformat(
-                    raw_exp.replace("Z", "+00:00")
-                ).timestamp()
-            except Exception:
-                expires_at = time.time() + _DEFAULT_TOKEN_EXPIRY_SECONDS
-
-            if copilot_token:
-                _copilot_token_cache[github_token] = _CopilotToken(
-                    token=copilot_token, expires_at=expires_at
-                )
-                return copilot_token
-    except Exception:
-        pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Unified token resolver
-# ---------------------------------------------------------------------------
-
 def _resolve_api_key(provider: str) -> Optional[str]:
-    """Return a ready-to-use API token for *provider*, or None."""
-    # 1. Explicit env / .env var (may be a Copilot token or raw GitHub token)
+    """Return an API key/token for *provider*, or None if not configured."""
+    # 1. Explicit env / .env variable
     key = os.environ.get("LLM_API_KEY")
-    if not key and provider == "copilot":
-        # 2. GitHub CLI token
-        key = _load_token_from_gh_cli()
-    if not key and provider == "copilot":
-        # 3. VS Code credential store
-        key = _load_copilot_token_from_vscode()
-
-    if not key:
-        return None
-
-    # For the Copilot provider, a raw GitHub token must be exchanged
-    if provider == "copilot" and _is_raw_github_token(key):
-        exchanged = _exchange_for_copilot_token(key)
-        if exchanged:
-            return exchanged
-        # Exchange failed — the raw GitHub token probably won't work directly,
-        # but return it anyway so the caller gets a meaningful error from the API
+    if key:
         return key
-
-    return key
+    # 2. GitHub CLI (relevant for github_models and the legacy "copilot" alias)
+    if provider in ("github_models", "copilot"):
+        key = _load_token_from_gh_cli()
+        if key:
+            return key
+        # 3. VS Code / Copilot credential store
+        key = _load_token_from_vscode_store()
+        if key:
+            return key
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -248,49 +166,27 @@ class LLMClient:
         # Load .env before reading any env vars
         _load_dotenv()
 
-        self.provider = (provider or os.environ.get("LLM_PROVIDER", "copilot")).lower()
+        raw_provider = (provider or os.environ.get("LLM_PROVIDER", "github_models")).lower()
+        # "copilot" is kept as a backward-compatible alias for "github_models":
+        # both providers authenticate with a GitHub token and use the same
+        # GitHub Models API endpoint, so there is no functional difference.
+        self.provider = "github_models" if raw_provider == "copilot" else raw_provider
+
         self.api_key = api_key or _resolve_api_key(self.provider)
-        self.model = model or os.environ.get("LLM_MODEL") or self._default_model()
+        self.model = model or os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
         self.base_url = base_url or os.environ.get("LLM_BASE_URL") or self._default_url()
-
-        # Store the raw GitHub token so we can refresh the Copilot token later
-        self._github_token: Optional[str] = None
-        if self.provider == "copilot" and self.api_key:
-            # If the resolved key is a Copilot token, store the source GitHub token
-            # so _refresh_copilot_token() can re-exchange it.
-            raw = (
-                os.environ.get("LLM_API_KEY")
-                or _load_token_from_gh_cli()
-                or _load_copilot_token_from_vscode()
-            )
-            if raw and _is_raw_github_token(raw):
-                self._github_token = raw
-
-    # ------------------------------------------------------------------
-
-    def _default_model(self) -> str:
-        if self.provider == "openai":
-            return _DEFAULT_MODEL_OPENAI
-        return _DEFAULT_MODEL_COPILOT
 
     def _default_url(self) -> str:
         if self.provider == "openai":
             return _OPENAI_ENDPOINT
         if self.provider == "openai_compatible":
             return os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions")
-        return _COPILOT_ENDPOINT
+        return _GITHUB_MODELS_ENDPOINT
 
     @property
     def is_available(self) -> bool:
         """Return True when a token/key is configured."""
         return bool(self.api_key)
-
-    def _refresh_copilot_token(self) -> None:
-        """Re-exchange the GitHub token for a fresh Copilot API token if needed."""
-        if self._github_token:
-            fresh = _exchange_for_copilot_token(self._github_token)
-            if fresh:
-                self.api_key = fresh
 
     def _headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {
@@ -299,9 +195,6 @@ class LLMClient:
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        if self.provider == "copilot":
-            headers["Copilot-Integration-Id"] = "vscode-chat"
-            headers["Editor-Version"] = "vscode/1.85.0"
         return headers
 
     def chat(
@@ -319,13 +212,15 @@ class LLMClient:
         """
         if not self.is_available:
             raise LLMUnavailableError(
-                "No LLM API key found.  To enable GitHub Copilot:\n"
-                "  1. Run `gh auth login` and authenticate with GitHub.\n"
-                "     The pipeline will automatically exchange your GitHub token\n"
-                "     for a Copilot API token.\n"
+                "No API key found.  To authenticate:\n"
+                "  1. Run `gh auth login` — the pipeline will use your GitHub token\n"
+                "     automatically with the GitHub Models API.\n"
                 "  OR\n"
-                "  2. Set LLM_API_KEY=<your-token> in a .env file (or environment).\n"
-                "     For OpenAI: also set LLM_PROVIDER=openai."
+                "  2. Set LLM_API_KEY=<your-github-pat> in a .env file (or environment).\n"
+                "     For OpenAI: also set LLM_PROVIDER=openai and LLM_API_KEY=<openai-key>.\n"
+                "  OR\n"
+                "  3. Set LLM_PROVIDER=openai_compatible and LLM_BASE_URL=<endpoint> for\n"
+                "     a local model server (e.g. Ollama, LM Studio)."
             )
 
         payload: Dict[str, Any] = {
@@ -337,10 +232,6 @@ class LLMClient:
 
         last_exc: Optional[Exception] = None
         for attempt in range(retry + 1):
-            # Refresh the Copilot token before each attempt in case it expired
-            if self.provider == "copilot":
-                self._refresh_copilot_token()
-
             try:
                 resp = requests.post(
                     self.base_url,
@@ -348,11 +239,6 @@ class LLMClient:
                     json=payload,
                     timeout=_REQUEST_TIMEOUT,
                 )
-                if resp.status_code == 401 and self.provider == "copilot" and self._github_token:
-                    # Token was rejected — invalidate the cache and retry once
-                    _copilot_token_cache.pop(self._github_token, None)
-                    self.api_key = _exchange_for_copilot_token(self._github_token) or self.api_key
-                    continue
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", "5"))
                     time.sleep(wait)
