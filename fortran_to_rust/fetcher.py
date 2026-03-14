@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import tarfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -51,9 +52,16 @@ def _cache_dir(output_dir: Path) -> Path:
 
 
 def _try_download_file(url: str, dest: Path) -> bool:
-    """Return True if file was downloaded successfully."""
+    """Return True if file was downloaded successfully.
+
+    Only http:// and https:// URLs are accepted to prevent unintended
+    access to local files or other schemes.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
     try:
-        urllib.request.urlretrieve(url, dest)  # noqa: S310
+        urllib.request.urlretrieve(url, dest)  # noqa: S310 – scheme validated above
         return dest.exists() and dest.stat().st_size > 100
     except Exception:
         return False
@@ -67,7 +75,14 @@ def _try_download_tarball(output_dir: Path) -> bool:
         return False
     try:
         with tarfile.open(tmp_tar) as t:
-            t.extractall(output_dir)  # noqa: S202
+            # Guard against path-traversal: only extract members whose
+            # resolved path stays inside output_dir.
+            safe_members = []
+            for member in t.getmembers():
+                member_path = (output_dir / member.name).resolve()
+                if output_dir.resolve() in member_path.parents or member_path == output_dir.resolve():
+                    safe_members.append(member)
+            t.extractall(output_dir, members=safe_members)
         # Move extracted .f files into cache dir
         cache = _cache_dir(output_dir)
         for extracted in output_dir.rglob("*.f"):

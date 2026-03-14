@@ -24,7 +24,7 @@ class BenchResult:
     function_name: str
     fortran_time_ms: Optional[float] = None   # median wall-clock ms
     rust_time_ms: Optional[float] = None       # median wall-clock ms
-    speedup: Optional[float] = None            # rust / fortran  (>1 = Rust faster)
+    speedup: Optional[float] = None            # fortran / rust  (>1 = Rust faster)
     error_message: Optional[str] = None
     details: List[str] = field(default_factory=list)
 

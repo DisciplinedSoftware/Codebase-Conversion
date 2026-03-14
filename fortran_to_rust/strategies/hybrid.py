@@ -110,6 +110,13 @@ class HybridStrategy(ConversionStrategy):
     # C → Rust rule-based transformation
     # ------------------------------------------------------------------
 
+    # Type mappings used for return types and variable declarations.
+    # 'void' maps to the unit type '()' which is only valid as a return type;
+    # it should never appear as a parameter type in f2c output.
+    _F2C_RETURN_TYPES = {
+        "void": "()",
+        "int": "i32",
+    }
     _F2C_TYPES = {
         "doublereal": "f64",
         "real": "f32",
@@ -118,7 +125,6 @@ class HybridStrategy(ConversionStrategy):
         "ftnlen": "i32",
         "int": "i32",
         "double": "f64",
-        "void": "()",
     }
 
     # f2c array argument pattern: "doublereal *a"  →  "&mut [f64]" / "&[f64]"
