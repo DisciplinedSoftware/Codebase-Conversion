@@ -9,6 +9,7 @@ Provides helpers to:
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -80,7 +81,10 @@ def quick_check(rust_source: str, work_dir: Path) -> Tuple[bool, str]:
     """Compile *rust_source* in a throw-away crate and return (ok, output).
 
     Used by the compile-repair loop so we don't need to build the whole crate.
+    Returns (False, message) when ``cargo`` is not installed.
     """
+    if not shutil.which("cargo"):
+        return False, "cargo not found: install Rust from https://rustup.rs"
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         src_dir = tmp / "src"
@@ -93,50 +97,77 @@ def quick_check(rust_source: str, work_dir: Path) -> Tuple[bool, str]:
         wrapped = _LIB_RS_HEADER + "\n" + rust_source
         (src_dir / "lib.rs").write_text(wrapped)
 
-        result = subprocess.run(
-            ["cargo", "check", "--message-format=short"],
-            capture_output=True,
-            text=True,
-            cwd=tmpdir,
-            timeout=60,
-        )
+        try:
+            result = subprocess.run(
+                ["cargo", "check", "--message-format=short"],
+                capture_output=True,
+                text=True,
+                cwd=tmpdir,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            return False, "cargo not found: install Rust from https://rustup.rs"
         combined = (result.stdout + result.stderr).strip()
         return result.returncode == 0, combined
 
 
 def build_crate(crate_dir: Path) -> Tuple[bool, str]:
-    """Run ``cargo build --release`` and return (ok, output)."""
-    result = subprocess.run(
-        ["cargo", "build", "--release"],
-        capture_output=True,
-        text=True,
-        cwd=crate_dir,
-        timeout=120,
-    )
+    """Run ``cargo build --release`` and return (ok, output).
+
+    Returns (False, message) when ``cargo`` is not installed.
+    """
+    if not shutil.which("cargo"):
+        return False, "cargo not found: install Rust from https://rustup.rs"
+    try:
+        result = subprocess.run(
+            ["cargo", "build", "--release"],
+            capture_output=True,
+            text=True,
+            cwd=crate_dir,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        return False, "cargo not found: install Rust from https://rustup.rs"
     return result.returncode == 0, (result.stdout + result.stderr).strip()
 
 
 def test_crate(crate_dir: Path) -> Tuple[bool, str]:
-    """Run ``cargo test`` and return (ok, output)."""
-    result = subprocess.run(
-        ["cargo", "test"],
-        capture_output=True,
-        text=True,
-        cwd=crate_dir,
-        timeout=120,
-    )
+    """Run ``cargo test`` and return (ok, output).
+
+    Returns (False, message) when ``cargo`` is not installed.
+    """
+    if not shutil.which("cargo"):
+        return False, "cargo not found: install Rust from https://rustup.rs"
+    try:
+        result = subprocess.run(
+            ["cargo", "test"],
+            capture_output=True,
+            text=True,
+            cwd=crate_dir,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        return False, "cargo not found: install Rust from https://rustup.rs"
     return result.returncode == 0, (result.stdout + result.stderr).strip()
 
 
 def clippy_crate(crate_dir: Path) -> Tuple[bool, str]:
-    """Run ``cargo clippy`` and return (ok, output)."""
-    result = subprocess.run(
-        ["cargo", "clippy", "--", "-D", "warnings"],
-        capture_output=True,
-        text=True,
-        cwd=crate_dir,
-        timeout=60,
-    )
+    """Run ``cargo clippy`` and return (ok, output).
+
+    Returns (False, message) when ``cargo`` is not installed.
+    """
+    if not shutil.which("cargo"):
+        return False, "cargo not found: install Rust from https://rustup.rs"
+    try:
+        result = subprocess.run(
+            ["cargo", "clippy", "--", "-D", "warnings"],
+            capture_output=True,
+            text=True,
+            cwd=crate_dir,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        return False, "cargo not found: install Rust from https://rustup.rs"
     return result.returncode == 0, (result.stdout + result.stderr).strip()
 
 
