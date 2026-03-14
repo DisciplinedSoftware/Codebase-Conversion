@@ -118,6 +118,9 @@ def _generate_fortran_bench(
         elif len(sizes) >= 2:
             n_rows = sizes[0]
             assign_lines.append(f"      DO INIT_I=1,{total}")
+            # Convert 1-based linear index INIT_I to column-major (row, col):
+            #   row = MOD(INIT_I-1, n_rows) + 1
+            #   col = (INIT_I-1) / n_rows   + 1
             assign_lines.append(
                 f"      {arr_name}(MOD(INIT_I-1,{n_rows})+1,"
                 f"(INIT_I-1)/{n_rows}+1) = 0.5D0"

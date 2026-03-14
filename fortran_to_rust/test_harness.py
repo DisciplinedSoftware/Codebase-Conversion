@@ -160,11 +160,23 @@ def parse_arg_declarations(source: str, arg_names: List[str]) -> Dict[str, ArgDe
 # ---------------------------------------------------------------------------
 
 _DIM_DEFAULTS: Dict[str, int] = {
-    "M": 4,   "N": 4,   "K": 4,
-    "LDA": 4, "LDB": 4, "LDC": 4, "LDE": 4, "LDF": 4,
-    "INCX": 1, "INCY": 1, "INC": 1,
-    "NRHS": 2, "KL": 1, "KU": 1, "KB": 4,
-    "P": 3,   "Q": 3,
+    "M": 4,
+    "N": 4,
+    "K": 4,
+    "LDA": 4,
+    "LDB": 4,
+    "LDC": 4,
+    "LDE": 4,
+    "LDF": 4,
+    "INCX": 1,
+    "INCY": 1,
+    "INC": 1,
+    "NRHS": 2,
+    "KL": 1,
+    "KU": 1,
+    "KB": 4,
+    "P": 3,
+    "Q": 3,
 }
 
 
@@ -245,7 +257,7 @@ def _fortran_scalar_init(name: str, decl: ArgDecl, seed_offset: int) -> str:
     if decl.is_char:
         return f"      {name} = 'N'"
     if decl.is_logical:
-        return f"      {name} = .TRUE."
+        return f"      {name} = .FALSE."
     if decl.is_integer:
         return ""   # dimension vars are assigned separately
     val = rng.uniform(0.5, 2.0)
