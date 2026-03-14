@@ -3,8 +3,12 @@ FROM mcr.microsoft.com/devcontainers/python:1-3.12-bookworm
 
 # ---------------------------------------------------------------------------
 # System tools: Fortran compiler, f2c transpiler, f2c runtime library
+#
+# The base image ships a Yarn apt source whose GPG key is no longer trusted.
+# Remove it before running apt-get update to prevent the build from failing.
 # ---------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN find /etc/apt/sources.list.d/ -name "*yarn*" -delete 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends \
         gfortran \
         f2c \
         libf2c2 \
