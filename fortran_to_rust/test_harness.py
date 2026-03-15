@@ -985,8 +985,9 @@ def run_accuracy_check(
             _generate_rust_example(
                 fn, arg_names, arg_decls, assigned_dims, crate_dir, dataset_path,
                 routine_kind=routine_kind, return_ftype=return_ftype,
+                example_suffix=str(t),
             )
-            rust_out = _compile_run_rust_example(crate_dir, fn)
+            rust_out = _compile_run_rust_example(crate_dir, fn, example_suffix=str(t))
 
         if rust_out and len(rust_out) == len(fortran_out) and fortran_out:
             case_errors = [abs(rust_out[i] - fortran_out[i]) for i in range(len(fortran_out))]
