@@ -84,18 +84,18 @@ def run(output_dir: Path) -> None:
     # --- 1. Library selection -----------------------------------------------
     library = _ask_library()
 
-    # --- 2. Fetch source -------------------------------------------------------
+    # --- 2. Strategy selection -------------------------------------------------
     console.print()
-    console.print(Panel("[bold]Step 1 — Fetching source code[/bold]", style="cyan"))
+    console.print(Panel("[bold]Step 1 — Choose a conversion strategy[/bold]", style="cyan"))
+    strategy_key = _ask_strategy()
+
+    # --- 3. Fetch source -------------------------------------------------------
+    console.print()
+    console.print(Panel("[bold]Step 2 — Fetching source code[/bold]", style="cyan"))
     functions_to_convert, source_map = _fetch_and_select(library, output_dir)
     if not functions_to_convert:
         console.print("[red]No functions selected. Exiting.[/red]")
         sys.exit(0)
-
-    # --- 3. Strategy selection -------------------------------------------------
-    console.print()
-    console.print(Panel("[bold]Step 2 — Choose a conversion strategy[/bold]", style="cyan"))
-    strategy_key = _ask_strategy()
 
     # --- 4. LLM configuration (if needed) -------------------------------------
     llm = _configure_llm(strategy_key)
