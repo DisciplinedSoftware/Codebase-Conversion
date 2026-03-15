@@ -26,12 +26,15 @@ from typing import Dict, List, Optional
 from fortran_to_rust.rust_project import get_crate_lib_name
 from fortran_to_rust.test_harness import (
     ArgDecl,
+    TestDataset,
     _array_size,
     _assign_dims,
     _find_support_files,
     _fortran_call,
     _get_fortran_lock,
+    generate_dataset,
     parse_arg_declarations,
+    write_dataset_file,
 )
 
 _REPS = 10   # number of timed repetitions
@@ -66,10 +69,14 @@ class BenchResult:
 _FORTRAN_BENCH_TEMPLATE = """\
       PROGRAM BENCH_{name}
       IMPLICIT NONE
-      INTEGER BENCH_R, INIT_I
+      INTEGER BENCH_R, RDSI, RDSJ
       DOUBLE PRECISION BENCH_T1, BENCH_T2, BENCH_ELAPSED
 {declarations}
-{assignments}
+      ! Load shared dataset from file (excluded from timing).
+      OPEN(UNIT=99, FILE='{dataset_path}', STATUS='OLD')
+{read_stmts}
+      CLOSE(99)
+{const_stmts}
       CALL CPU_TIME(BENCH_T1)
       DO BENCH_R = 1, {reps}
 {call_stmt}
@@ -86,68 +93,93 @@ def _generate_fortran_bench(
     arg_names: List[str],
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
+    dataset_path: Path,
     reps: int = _REPS,
 ) -> str:
-    decl_lines: List[str] = []
-    assign_lines: List[str] = []
+    """Generate a Fortran benchmark program that loads inputs from *dataset_path*.
 
-    int_scalars = [n for n, d in arg_decls.items() if d.is_integer and not d.is_array]
+    The dataset file is read **before** the timed ``DO`` loop so that I/O does
+    not inflate the benchmark measurement.
+    """
+    decl_lines: List[str] = []
+    read_lines: List[str] = []
+    const_lines: List[str] = []
+
+    # Iterate arg_names in order to match the dataset file layout.
+    int_scalars  = [n.upper() for n in arg_names
+                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_integer
+                    and not arg_decls[n.upper()].is_array]
+    dp_scalars   = [n.upper() for n in arg_names
+                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_real
+                    and not arg_decls[n.upper()].is_array]
+    char_scalars = [n.upper() for n in arg_names
+                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_char
+                    and not arg_decls[n.upper()].is_array]
+    log_scalars  = [n.upper() for n in arg_names
+                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_logical
+                    and not arg_decls[n.upper()].is_array]
+    array_args   = [(n.upper(), arg_decls[n.upper()])
+                    for n in arg_names
+                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_array
+                    and arg_decls[n.upper()].is_real]
+
     if int_scalars:
         decl_lines.append("      INTEGER " + ", ".join(int_scalars))
-        for n in int_scalars:
-            assign_lines.append(f"      {n} = {assigned_dims.get(n, 4)}")
-
-    dp_scalars = [n for n, d in arg_decls.items() if d.is_real and not d.is_array]
     if dp_scalars:
         decl_lines.append("      DOUBLE PRECISION " + ", ".join(dp_scalars))
-        for n in dp_scalars:
-            assign_lines.append(f"      {n} = 1.0D0")
-
-    # Array init — use INIT_I, not BENCH_R, to avoid variable conflict
-    for arr_name, decl in [(n, d) for n, d in arg_decls.items() if d.is_array and d.is_real]:
+    for arr_name, decl in array_args:
         sizes = _array_size(decl, assigned_dims)
-        if not sizes:
-            continue
-        dim_str = ", ".join(str(s) for s in sizes)
-        decl_lines.append(f"      DOUBLE PRECISION {arr_name}({dim_str})")
-        total = 1
-        for s in sizes:
-            total *= s
-        if len(sizes) == 1:
-            assign_lines.append(f"      DO INIT_I=1,{sizes[0]}")
-            assign_lines.append(f"      {arr_name}(INIT_I) = 0.5D0")
-            assign_lines.append(f"      END DO")
-        elif len(sizes) >= 2:
-            n_rows = sizes[0]
-            assign_lines.append(f"      DO INIT_I=1,{total}")
-            # Convert 1-based linear index INIT_I to column-major (row, col):
-            #   row = MOD(INIT_I-1, n_rows) + 1
-            #   col = (INIT_I-1) / n_rows   + 1
-            assign_lines.append(
-                f"      {arr_name}(MOD(INIT_I-1,{n_rows})+1,"
-                f"(INIT_I-1)/{n_rows}+1) = 0.5D0"
-            )
-            assign_lines.append(f"      END DO")
-
-    char_scalars = [n for n, d in arg_decls.items() if d.is_char and not d.is_array]
+        if sizes:
+            dim_str = ", ".join(str(s) for s in sizes)
+            decl_lines.append(f"      DOUBLE PRECISION {arr_name}({dim_str})")
     if char_scalars:
         decl_lines.append("      CHARACTER*1 " + ", ".join(char_scalars))
-        for n in char_scalars:
-            assign_lines.append(f"      {n} = 'N'")
+    if log_scalars:
+        decl_lines.append("      LOGICAL " + ", ".join(log_scalars))
 
-    logical_scalars = [n for n, d in arg_decls.items() if d.is_logical and not d.is_array]
-    if logical_scalars:
-        decl_lines.append("      LOGICAL " + ", ".join(logical_scalars))
-        for n in logical_scalars:
-            assign_lines.append(f"      {n} = .FALSE.")
+    # Build READ statements for real args (same order as the dataset file).
+    for name in arg_names:
+        upper = name.upper()
+        decl = arg_decls.get(upper)
+        if decl is None or not decl.is_real:
+            continue
+        if not decl.is_array:
+            read_lines.append(f"      READ(99,*) {upper}")
+        else:
+            sizes = _array_size(decl, assigned_dims)
+            if not sizes:
+                continue
+            if len(sizes) == 1:
+                read_lines += [
+                    f"      DO RDSI=1,{sizes[0]}",
+                    f"        READ(99,*) {upper}(RDSI)",
+                    f"      END DO",
+                ]
+            elif len(sizes) == 2:
+                read_lines += [
+                    f"      DO RDSJ=1,{sizes[1]}",
+                    f"        DO RDSI=1,{sizes[0]}",
+                    f"          READ(99,*) {upper}(RDSI,RDSJ)",
+                    f"        END DO",
+                    f"      END DO",
+                ]
 
-    # Use _fortran_call to handle long argument lists with Fortran-77 continuation
+    # Hardcode non-real constants.
+    for n in int_scalars:
+        const_lines.append(f"      {n} = {assigned_dims.get(n, 4)}")
+    for n in char_scalars:
+        const_lines.append(f"      {n} = 'N'")
+    for n in log_scalars:
+        const_lines.append(f"      {n} = .FALSE.")
+
     call_stmt = _fortran_call(routine_name.upper(), arg_names)
 
     return _FORTRAN_BENCH_TEMPLATE.format(
         name=routine_name.upper(),
+        dataset_path=dataset_path,
         declarations="\n".join(decl_lines),
-        assignments="\n".join(assign_lines),
+        read_stmts="\n".join(read_lines),
+        const_stmts="\n".join(const_lines),
         call_stmt=call_stmt,
         reps=reps,
     )
@@ -212,6 +244,13 @@ use {crate_name}::*;
 
 fn main() {{
     const REPS: usize = {reps};
+
+    // Load shared dataset from file (excluded from timing).
+    let _ds_str = std::fs::read_to_string("{dataset_path}")
+        .expect("dataset file not found");
+    let mut _ds = _ds_str.split_ascii_whitespace()
+        .map(|s| s.parse::<f64>().expect("bad float in dataset"));
+
 {rust_inputs}
 
     let start = Instant::now();
@@ -230,8 +269,14 @@ def _generate_rust_bench(
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
     crate_dir: Path,
+    dataset_path: Path,
     reps: int = _REPS,
 ) -> bool:
+    """Generate a Rust benchmark binary that loads inputs from *dataset_path*.
+
+    The dataset file is read **before** ``Instant::now()`` so that I/O does not
+    inflate the benchmark measurement.
+    """
     fn_lower = routine_name.lower()
     examples_dir = crate_dir / "examples"
     examples_dir.mkdir(exist_ok=True)
@@ -249,14 +294,16 @@ def _generate_rust_bench(
             inputs.append(f"    let {rname}: i32 = {assigned_dims.get(name.upper(), 4)};")
             call_args.append(rname)
         elif decl.is_real and not decl.is_array:
-            inputs.append(f"    let {rname}: f64 = 1.0;")
+            inputs.append(f"    let {rname}: f64 = _ds.next().unwrap();")
             call_args.append(rname)
         elif decl.is_real and decl.is_array:
             sizes = _array_size(decl, assigned_dims)
             total = 1
             for s in (sizes or [4]):
                 total *= s
-            inputs.append(f"    let mut {rname} = vec![0.5_f64; {total}];")
+            inputs.append(
+                f"    let mut {rname}: Vec<f64> = (0..{total}).map(|_| _ds.next().unwrap()).collect();"
+            )
             call_args.append(f"&mut {rname}")
         elif decl.is_logical:
             inputs.append(f"    let {rname}: bool = false;")
@@ -270,6 +317,7 @@ def _generate_rust_bench(
         fn_name=routine_name,
         fn_lower=fn_lower,
         crate_name=crate_name,
+        dataset_path=dataset_path,
         reps=reps,
         rust_inputs="\n".join(inputs),
         call_args=", ".join(call_args),
@@ -339,15 +387,31 @@ def run_benchmark(
 
     assigned_dims = _assign_dims(arg_decls)
 
+    # Generate a single dataset (test_index=0) and write it to a shared file
+    # that both Fortran and Rust benchmark drivers will read at runtime.
+    fortran_keep_dir = (
+        fortran_ref_dir
+        if fortran_ref_dir is not None
+        else ((crate_dir.parent / "fortran") if crate_dir else None)
+    )
+    if crate_dir:
+        datasets_dir = crate_dir / "datasets"
+    elif fortran_keep_dir:
+        datasets_dir = fortran_keep_dir / "datasets"
+    else:
+        import tempfile as _tf
+        datasets_dir = Path(_tf.mkdtemp())
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+
+    fn_lower = fn.lower()
+    dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=0)
+    dataset_path = datasets_dir / f"{fn_lower}_bench.txt"
+    write_dataset_file(dataset, dataset_path)
+
     fortran_ms: Optional[float] = None
     if fortran_source_path and fortran_source_path.exists():
         extra = [fortran_source_path] + _find_support_files(fortran_source_path.parent)
-        bench_src = _generate_fortran_bench(fn, arg_names, arg_decls, assigned_dims, reps)
-        fortran_keep_dir = (
-            fortran_ref_dir
-            if fortran_ref_dir is not None
-            else ((crate_dir.parent / "fortran") if crate_dir else None)
-        )
+        bench_src = _generate_fortran_bench(fn, arg_names, arg_decls, assigned_dims, dataset_path, reps)
         fortran_ms = _run_fortran_bench(bench_src, extra, keep_dir=fortran_keep_dir)
         if fortran_ms is not None:
             dim_info = ", ".join(f"{k}={v}" for k, v in sorted(assigned_dims.items()))
@@ -357,7 +421,7 @@ def run_benchmark(
 
     rust_ms: Optional[float] = None
     if crate_dir and crate_dir.exists():
-        _generate_rust_bench(fn, arg_names, arg_decls, assigned_dims, crate_dir, reps)
+        _generate_rust_bench(fn, arg_names, arg_decls, assigned_dims, crate_dir, dataset_path, reps)
         rust_ms = _run_rust_bench(crate_dir, fn)
         if rust_ms is not None:
             details.append(f"  Rust   (--release):       {rust_ms:.3f} ms/call")

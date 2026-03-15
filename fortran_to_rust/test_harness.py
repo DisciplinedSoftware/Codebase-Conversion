@@ -3,19 +3,18 @@
 For each converted function, this module:
 
 1. **Parses** the Fortran argument declarations to discover types and array shapes.
-2. **Generates** a :class:`TestDataset` — a single, deterministic set of concrete
-   input values shared by both drivers.
-3. **Generates** a Fortran test driver (``PROGRAM``) on the fly, initialised from
-   the shared dataset.
+2. **Generates** a :class:`TestDataset` and writes it to a plain-text file
+   (one real value per line) via :func:`write_dataset_file`.
+3. **Generates** a Fortran test driver (``PROGRAM``) that opens and reads that
+   file at runtime to obtain its inputs.
 4. **Compiles and runs** the Fortran driver with the *original* reference sources to
    obtain the expected outputs.
-5. **Generates** a Rust example binary that calls the converted function with the
-   same dataset values.
+5. **Generates** a Rust example binary that reads the same file at runtime.
 6. **Compares** the two output streams; reports max / mean absolute error.
 
-Steps 3 and 5 are both driven by the same :class:`TestDataset` object, so it is
-structurally impossible for the two drivers to diverge on their inputs.
-Both step 4 and step 5 are driven entirely by the information in the
+Because both drivers read from the same on-disk file (steps 3 and 5), it is
+structurally impossible for them to receive different numerical inputs.
+Both are driven entirely by the information in the
 :class:`~fortran_to_rust.parser.FortranRoutine` object, so the harness works for
 *any* function without requiring function-specific knowledge.
 """
@@ -139,6 +138,30 @@ def generate_dataset(
             values[upper] = [rng.uniform(-1.0, 1.0) for _ in range(total)]
 
     return TestDataset(test_index=test_index, arg_names=arg_names, values=values)
+
+
+def write_dataset_file(dataset: TestDataset, path: Path) -> None:
+    """Write the real-valued entries of *dataset* to *path*, one value per line.
+
+    Only DOUBLE PRECISION / REAL arguments are written (scalar → one line,
+    array → one line per element in flat column-major order).  INTEGER,
+    CHARACTER and LOGICAL arguments keep hardcoded constants in the generated
+    source and are **not** included in the file.
+
+    Both the Fortran driver and the Rust example binary read this file at
+    runtime, guaranteeing identical numerical inputs without any re-seeding.
+    """
+    lines: List[str] = []
+    for name in dataset.arg_names:
+        val = dataset.values.get(name.upper())
+        if isinstance(val, float):
+            lines.append(repr(val))
+        elif isinstance(val, list):
+            for v in val:
+                lines.append(repr(v))
+        # int / bool / str (INTEGER, LOGICAL, CHARACTER) → hardcoded in source
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +434,7 @@ def generate_fortran_driver(
     arg_names: List[str],
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
-    dataset: "TestDataset",
+    dataset_path: Path,
     routine_kind: str = "subroutine",
     return_ftype: str = "DOUBLE PRECISION",
 ) -> str:
@@ -420,9 +443,10 @@ def generate_fortran_driver(
     For subroutines the output is the modified arrays/scalars.
     For functions (``routine_kind='function'``) the return value is captured and printed.
 
-    Accepts a ``TestDataset`` whose ``values`` were produced by ``generate_dataset``
-    so that the Fortran driver and the Rust example binary use an identical set of
-    concrete input values.
+    Real-valued inputs are loaded at runtime from *dataset_path* (written by
+    ``write_dataset_file``), so both the Fortran driver and the Rust example
+    binary read from the same file and are guaranteed identical numerical inputs.
+    INTEGER, CHARACTER and LOGICAL arguments are hardcoded as constants.
     """
     # --- Collect grouped types for Fortran declarations ---
     int_scalars = [n.upper() for n in arg_names
@@ -459,61 +483,103 @@ def generate_fortran_driver(
     if logical_scalars:
         decl_lines.append("      LOGICAL " + ", ".join(logical_scalars))
 
-    # --- Assignments and print loops, values sourced from the shared dataset ---
-    assign_lines: List[str] = []
-    print_lines: List[str] = []
+    # --- Build file-reading section (OPEN / READ / CLOSE) ---
+    # Real args are read from the shared dataset file in arg_names order.
+    # RDSI / RDSJ are loop variables for array reads; add them to declarations.
+    need_rdsi = any(
+        arg_decls.get(n.upper()) and arg_decls[n.upper()].is_real
+        and arg_decls[n.upper()].is_array
+        for n in arg_names
+    )
+    need_rdsj = any(
+        arg_decls.get(n.upper()) and arg_decls[n.upper()].is_real
+        and arg_decls[n.upper()].is_array
+        and len(_array_size(arg_decls[n.upper()], assigned_dims) or []) >= 2
+        for n in arg_names
+    )
+    read_int_vars: List[str] = []
+    if need_rdsi:
+        read_int_vars.append("RDSI")
+    if need_rdsj:
+        read_int_vars.append("RDSJ")
 
+    read_lines: List[str] = [
+        f"      OPEN(UNIT=99, FILE='{dataset_path}', STATUS='OLD')",
+    ]
     for name in arg_names:
         upper = name.upper()
         decl = arg_decls.get(upper)
-        if decl is None:
+        if decl is None or not decl.is_real:
             continue
-        val = dataset.values.get(upper)
-        if decl.is_char and not decl.is_array:
-            assign_lines.append(f"      {upper} = 'N'")
-        elif decl.is_logical and not decl.is_array:
-            assign_lines.append(f"      {upper} = .FALSE.")
-        elif decl.is_integer and not decl.is_array:
-            assign_lines.append(f"      {upper} = {val if val is not None else assigned_dims.get(upper, 4)}")
-        elif decl.is_real and not decl.is_array:
-            assign_lines.append(f"      {upper} = {_f90_double(float(val))}")  # type: ignore[arg-type]
-        elif decl.is_real and decl.is_array:
+        if not decl.is_array:
+            read_lines.append(f"      READ(99,*) {upper}")
+        else:
             sizes = _array_size(decl, assigned_dims)
-            if not sizes or val is None:
+            if not sizes:
                 continue
-            vals: List[float] = list(val)  # type: ignore[arg-type]
             if len(sizes) == 1:
-                for i, v in enumerate(vals):
-                    assign_lines.append(f"      {upper}({i + 1}) = {_f90_double(v)}")
-                iv = f"I{upper}"
-                loop_int_vars.append(iv)
-                print_lines += [
-                    f"      DO {iv}=1,{sizes[0]}",
-                    f"        WRITE(*,'(ES25.15)') {upper}({iv})",
+                read_lines += [
+                    f"      DO RDSI=1,{sizes[0]}",
+                    f"        READ(99,*) {upper}(RDSI)",
                     f"      END DO",
                 ]
             elif len(sizes) == 2:
-                n_rows = sizes[0]
-                # vals is column-major: vals[row + col*n_rows]
-                for col in range(sizes[1]):
-                    for row in range(sizes[0]):
-                        v = vals[col * n_rows + row]
-                        assign_lines.append(
-                            f"      {upper}({row + 1},{col + 1}) = {_f90_double(v)}"
-                        )
-                iv = f"I{upper}"
-                jv = f"J{upper}"
-                loop_int_vars += [iv, jv]
-                print_lines += [
-                    f"      DO {jv}=1,{sizes[1]}",
-                    f"        DO {iv}=1,{sizes[0]}",
-                    f"          WRITE(*,'(ES25.15)') {upper}({iv},{jv})",
+                read_lines += [
+                    f"      DO RDSJ=1,{sizes[1]}",
+                    f"        DO RDSI=1,{sizes[0]}",
+                    f"          READ(99,*) {upper}(RDSI,RDSJ)",
                     f"        END DO",
                     f"      END DO",
                 ]
+    read_lines.append("      CLOSE(99)")
 
-    if loop_int_vars:
-        decl_lines.append("      INTEGER " + ", ".join(loop_int_vars))
+    # --- Constant assignments for non-real args ---
+    const_lines: List[str] = []
+    for name in arg_names:
+        upper = name.upper()
+        decl = arg_decls.get(upper)
+        if decl is None or decl.is_real:
+            continue
+        if decl.is_char and not decl.is_array:
+            const_lines.append(f"      {upper} = 'N'")
+        elif decl.is_logical and not decl.is_array:
+            const_lines.append(f"      {upper} = .FALSE.")
+        elif decl.is_integer and not decl.is_array:
+            const_lines.append(f"      {upper} = {assigned_dims.get(upper, 4)}")
+
+    # --- Print loops for array outputs ---
+    print_lines: List[str] = []
+    for name in arg_names:
+        upper = name.upper()
+        decl = arg_decls.get(upper)
+        if decl is None or not decl.is_real or not decl.is_array:
+            continue
+        sizes = _array_size(decl, assigned_dims)
+        if not sizes:
+            continue
+        if len(sizes) == 1:
+            iv = f"I{upper}"
+            loop_int_vars.append(iv)
+            print_lines += [
+                f"      DO {iv}=1,{sizes[0]}",
+                f"        WRITE(*,'(ES25.15)') {upper}({iv})",
+                f"      END DO",
+            ]
+        elif len(sizes) == 2:
+            iv = f"I{upper}"
+            jv = f"J{upper}"
+            loop_int_vars += [iv, jv]
+            print_lines += [
+                f"      DO {jv}=1,{sizes[1]}",
+                f"        DO {iv}=1,{sizes[0]}",
+                f"          WRITE(*,'(ES25.15)') {upper}({iv},{jv})",
+                f"        END DO",
+                f"      END DO",
+            ]
+
+    all_int_loop_vars = read_int_vars + loop_int_vars
+    if all_int_loop_vars:
+        decl_lines.append("      INTEGER " + ", ".join(all_int_loop_vars))
 
     # DP scalars (ALPHA, BETA, …) are read-only inputs in BLAS; printing them
     # after CALL would cause length mismatches in the Rust comparison without
@@ -524,7 +590,6 @@ def generate_fortran_driver(
     if routine_kind == "function":
         result_var = f"RES_{routine_name.upper()[:6]}"
         ftype_upper = return_ftype.strip().upper()
-        # Map return type to a Fortran type declaration
         if "INTEGER" in ftype_upper:
             ftype_decl = "INTEGER"
             print_fmt  = "(I20)"
@@ -534,12 +599,10 @@ def generate_fortran_driver(
         else:
             ftype_decl = "DOUBLE PRECISION"
             print_fmt  = "(ES25.15)"
-        # Declare the result variable, the function type, and EXTERNAL
         decl_lines.append(f"      {ftype_decl} {result_var}")
         decl_lines.append(f"      {ftype_decl} {routine_name.upper()}")
         decl_lines.append(f"      EXTERNAL {routine_name.upper()}")
         call_stmt = _fortran_assign_call(result_var, routine_name.upper(), arg_names)
-        # Print the function result after all array prints
         print_lines.append(f"      WRITE(*,'{print_fmt}') {result_var}")
     else:
         call_stmt = _fortran_call(routine_name.upper(), arg_names)
@@ -547,7 +610,8 @@ def generate_fortran_driver(
     parts = [
         _FORTRAN_DRIVER_HEADER.format(name=routine_name.upper()),
         "\n".join(decl_lines),
-        "\n".join(assign_lines),
+        "\n".join(read_lines),
+        "\n".join(const_lines),
         call_stmt,
         "\n".join(print_lines) if print_lines else "      CONTINUE",
         _FORTRAN_DRIVER_FOOTER,
@@ -632,6 +696,12 @@ _RUST_EXAMPLE_TEMPLATE_SUB = """\
 use {crate_name}::*;
 
 fn main() {{
+    // Load shared dataset from file (one real value per line, in argument order).
+    let _ds_str = std::fs::read_to_string("{dataset_path}")
+        .expect("dataset file not found");
+    let mut _ds = _ds_str.split_ascii_whitespace()
+        .map(|s| s.parse::<f64>().expect("bad float in dataset"));
+
 {rust_inputs}
 
     // Safety: the generated function may be declared unsafe if the LLM used raw pointers.
@@ -648,6 +718,12 @@ _RUST_EXAMPLE_TEMPLATE_FN = """\
 use {crate_name}::*;
 
 fn main() {{
+    // Load shared dataset from file (one real value per line, in argument order).
+    let _ds_str = std::fs::read_to_string("{dataset_path}")
+        .expect("dataset file not found");
+    let mut _ds = _ds_str.split_ascii_whitespace()
+        .map(|s| s.parse::<f64>().expect("bad float in dataset"));
+
 {rust_inputs}
 
     // Safety: the generated function may be declared unsafe if the LLM used raw pointers.
@@ -668,14 +744,15 @@ def _generate_rust_example(
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
     crate_dir: Path,
-    dataset: "TestDataset",
+    dataset_path: Path,
     routine_kind: str = "subroutine",
     return_ftype: str = "DOUBLE PRECISION",
 ) -> bool:
     """Write a Rust example binary that mirrors the Fortran test driver.
 
-    Values are sourced from *dataset* (produced by ``generate_dataset``) so that
-    the Rust example and the Fortran driver use an identical set of concrete inputs.
+    Real inputs are loaded at runtime from *dataset_path* (written by
+    ``write_dataset_file``), so the Rust example and the Fortran driver both
+    read from the same on-disk file and are guaranteed identical numerical inputs.
     """
     fn_lower = routine_name.lower()
     crate_name = get_crate_lib_name(crate_dir)
@@ -689,28 +766,24 @@ def _generate_rust_example(
     for name in arg_names:
         decl = arg_decls.get(name.upper(), ArgDecl(name=name.upper(), ftype="DOUBLE PRECISION", dims=[]))
         rname = name.lower()
-        val = dataset.values.get(name.upper())
 
         if decl.is_char:
             inputs.append(f"    let {rname}: u8 = b'N';")
             call_args.append(rname)
         elif decl.is_integer and not decl.is_array:
-            int_val = val if val is not None else assigned_dims.get(name.upper(), 4)
-            inputs.append(f"    let {rname}: i32 = {int_val};")
+            inputs.append(f"    let {rname}: i32 = {assigned_dims.get(name.upper(), 4)};")
             call_args.append(rname)
         elif decl.is_real and not decl.is_array:
-            inputs.append(f"    let {rname}: f64 = {float(val):.15f};")  # type: ignore[arg-type]
+            inputs.append(f"    let {rname}: f64 = _ds.next().unwrap();")
             call_args.append(rname)
         elif decl.is_real and decl.is_array:
-            arr_vals: List[float] = list(val) if val is not None else []  # type: ignore[arg-type]
-            if not arr_vals:
-                sizes = _array_size(decl, assigned_dims)
-                total = 1
-                for s in (sizes or [4]):
-                    total *= s
-                arr_vals = [0.0] * total
-            vals_str = ", ".join(f"{v:.15f}_f64" for v in arr_vals)
-            inputs.append(f"    let mut {rname} = vec![{vals_str}];")
+            sizes = _array_size(decl, assigned_dims)
+            total = 1
+            for s in (sizes or [4]):
+                total *= s
+            inputs.append(
+                f"    let mut {rname}: Vec<f64> = (0..{total}).map(|_| _ds.next().unwrap()).collect();"
+            )
             call_args.append(f"&mut {rname}")
             prints.append(f'    for v in &{rname} {{ println!("{{:.15e}}", v); }}')
         elif decl.is_logical:
@@ -725,6 +798,7 @@ def _generate_rust_example(
         fn_name=routine_name,
         fn_lower=fn_lower,
         crate_name=crate_name,
+        dataset_path=dataset_path,
         rust_inputs="\n".join(inputs),
         call_args=", ".join(call_args),
         rust_prints="\n".join(prints) if prints else "    // no array outputs",
@@ -830,10 +904,26 @@ def run_accuracy_check(
         else ((crate_dir.parent / "fortran") if crate_dir else None)
     )
 
+    # Resolve a stable directory for dataset files so both the Fortran driver
+    # and the Rust example binary can find them by absolute path.
+    if crate_dir:
+        datasets_dir = crate_dir / "datasets"
+    elif fortran_keep_dir:
+        datasets_dir = fortran_keep_dir / "datasets"
+    else:
+        import tempfile as _tf
+        datasets_dir = Path(_tf.mkdtemp())
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+
+    fn_lower = fn.lower()
+
     for t in range(num_tests):
         dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=t)
+        dataset_path = datasets_dir / f"{fn_lower}_t{t}.txt"
+        write_dataset_file(dataset, dataset_path)
+
         driver = generate_fortran_driver(
-            fn, arg_names, arg_decls, assigned_dims, dataset,
+            fn, arg_names, arg_decls, assigned_dims, dataset_path,
             routine_kind=routine_kind, return_ftype=return_ftype,
         )
         fortran_out = _compile_run_fortran(
@@ -852,7 +942,7 @@ def run_accuracy_check(
         rust_out: Optional[List[float]] = None
         if crate_dir and crate_dir.exists():
             _generate_rust_example(
-                fn, arg_names, arg_decls, assigned_dims, crate_dir, dataset,
+                fn, arg_names, arg_decls, assigned_dims, crate_dir, dataset_path,
                 routine_kind=routine_kind, return_ftype=return_ftype,
             )
             rust_out = _compile_run_rust_example(crate_dir, fn)
