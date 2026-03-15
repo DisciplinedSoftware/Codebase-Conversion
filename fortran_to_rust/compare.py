@@ -20,6 +20,7 @@ def run_strategy_worker(
     routine_map: Dict,
     strategy_key: str,
     fortran_ref_dir: Optional[Path] = None,
+    datasets_dir: Optional[Path] = None,
     step_callback: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Run convert → scaffold → build → test → accuracy → benchmark for one strategy.
@@ -83,6 +84,7 @@ def run_strategy_worker(
                 crate_dir,
                 routine=routine,
                 fortran_ref_dir=fortran_ref_dir,
+                datasets_dir=datasets_dir,
             )
             accuracy_results.append(acc)
 
@@ -97,6 +99,7 @@ def run_strategy_worker(
                 crate_dir,
                 routine=routine,
                 fortran_ref_dir=fortran_ref_dir,
+                datasets_dir=datasets_dir,
             )
             bench_results.append(bench)
 
@@ -172,6 +175,9 @@ def run_all_parallel(
     fortran_ref_dir = run_dir / "fortran_ref"
     fortran_ref_dir.mkdir(parents=True, exist_ok=True)
 
+    shared_datasets_dir = run_dir / "datasets"
+    shared_datasets_dir.mkdir(parents=True, exist_ok=True)
+
     all_results: Dict[str, dict] = {}
 
     def run_one(key: str) -> None:
@@ -187,6 +193,7 @@ def run_all_parallel(
             routine_map=routine_map,
             strategy_key=key,
             fortran_ref_dir=fortran_ref_dir,
+            datasets_dir=shared_datasets_dir,
             step_callback=step_cb,
         )
 

@@ -221,7 +221,8 @@ def run(output_dir: Path) -> None:
         src_path = source_map.get(fn_name.lower())
         routine = routine_map.get(fn_name.upper())
         acc = run_accuracy_check(
-            fn_name, src_path, crate_dir, routine=routine
+            fn_name, src_path, crate_dir, routine=routine,
+            datasets_dir=run_dir / "datasets",
         )
         accuracy_results.append(acc)
         _show_accuracy(acc)
@@ -233,7 +234,8 @@ def run(output_dir: Path) -> None:
     for fn_name in functions_to_convert:
         src_path = source_map.get(fn_name.lower())
         routine = routine_map.get(fn_name.upper())
-        br = run_benchmark(fn_name, src_path, crate_dir, routine=routine)
+        br = run_benchmark(fn_name, src_path, crate_dir, routine=routine,
+                           datasets_dir=run_dir / "datasets")
         bench_results.append(br)
         console.print(f"  {br.summary}")
         for d in br.details:

@@ -366,6 +366,7 @@ def run_benchmark(
     routine=None,
     reps: int = _REPS,
     fortran_ref_dir: Optional[Path] = None,
+    datasets_dir: Optional[Path] = None,
 ) -> BenchResult:
     """Benchmark *function_name* in both Fortran and Rust.
 
@@ -399,13 +400,14 @@ def run_benchmark(
         if fortran_ref_dir is not None
         else ((crate_dir.parent / "fortran") if crate_dir else None)
     )
-    if crate_dir:
-        datasets_dir = crate_dir / "datasets"
-    elif fortran_keep_dir:
-        datasets_dir = fortran_keep_dir / "datasets"
-    else:
-        import tempfile as _tf
-        datasets_dir = Path(_tf.mkdtemp())
+    if datasets_dir is None:
+        if crate_dir:
+            datasets_dir = crate_dir / "datasets"
+        elif fortran_keep_dir:
+            datasets_dir = fortran_keep_dir / "datasets"
+        else:
+            import tempfile as _tf
+            datasets_dir = Path(_tf.mkdtemp())
     datasets_dir.mkdir(parents=True, exist_ok=True)
 
     fn_lower = fn.lower()
