@@ -5,6 +5,12 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
+
+  // Devcontainer features — installed on top of the Dockerfile image.
+  // github-cli provides the `gh` command for `gh auth login` and token discovery.
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
   // Run as the non-root "vscode" user that the base image ships with.
   "remoteUser": "vscode",
   // Mount the workspace and carry Cargo's registry cache across rebuilds.
