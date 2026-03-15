@@ -330,7 +330,7 @@ def run_benchmark(
     if fortran_source_path and fortran_source_path.exists():
         extra = [fortran_source_path] + _find_support_files(fortran_source_path.parent)
         bench_src = _generate_fortran_bench(fn, arg_names, arg_decls, assigned_dims, reps)
-        fortran_keep_dir = (crate_dir / "fortran") if crate_dir else None
+        fortran_keep_dir = (crate_dir.parent / "fortran") if crate_dir else None
         fortran_ms = _run_fortran_bench(bench_src, extra, keep_dir=fortran_keep_dir)
         if fortran_ms is not None:
             dim_info = ", ".join(f"{k}={v}" for k, v in sorted(assigned_dims.items()))

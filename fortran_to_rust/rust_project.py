@@ -49,8 +49,8 @@ def scaffold_crate(
     crate_name: str,
     rust_sources: Dict[str, str],  # function_name -> rust_source
 ) -> Path:
-    """Create a Cargo crate at *output_dir/rust/<crate_name>* and return its path."""
-    crate_dir = output_dir / "rust" / crate_name
+    """Create a Cargo crate at *output_dir/rust* and return its path."""
+    crate_dir = output_dir / "rust"
     src_dir = crate_dir / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
 
