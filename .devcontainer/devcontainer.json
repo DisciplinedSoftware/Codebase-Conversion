@@ -29,7 +29,9 @@
         "rust-lang.rust-analyzer",
         "tamasfe.even-better-toml",
         "serayuzgur.crates",
-        "vadimcn.vscode-lldb"
+        "vadimcn.vscode-lldb",
+        "github.copilot",
+        "github.copilot-chat"
       ],
       "settings": {
         "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",

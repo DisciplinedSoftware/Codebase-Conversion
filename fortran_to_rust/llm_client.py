@@ -132,10 +132,12 @@ def _get_copilot_bearer(github_token: str) -> str:
 
     Token discovery order:
     1. In-memory cache (reuse until expiry).
-    2. Exchange the VS Code / Copilot credential store token — this token
-       was obtained via the Copilot OAuth app and has the required scope.
-    3. Exchange the supplied *github_token* (works when it has Copilot scope,
-       e.g. a classic PAT created on github.com/settings/tokens).
+    2. VS Code / Copilot extension credential store
+       (~/.config/github-copilot/hosts.json) — written by the github.copilot
+       VS Code extension; this token has the Copilot OAuth scope.
+    3. GITHUB_TOKEN env var — set automatically in GitHub Codespaces with
+       Copilot access when the subscription is linked to the organisation.
+    4. The supplied *github_token* — works for classic PATs with Copilot access.
 
     Raises LLMError if no exchange succeeds.
     """
@@ -143,10 +145,9 @@ def _get_copilot_bearer(github_token: str) -> str:
     if cached:
         return cached
 
-    # Prefer the VS Code Copilot store token — it was authorised with the
-    # Copilot OAuth app scope, which is required for the token exchange.
     vscode_token = _load_token_from_vscode_store()
-    candidates = [t for t in [vscode_token, github_token] if t]
+    codespaces_token = os.environ.get("GITHUB_TOKEN")
+    candidates = [t for t in [vscode_token, codespaces_token, github_token] if t]
 
     for candidate in candidates:
         token = _exchange_token(candidate)
@@ -156,14 +157,13 @@ def _get_copilot_bearer(github_token: str) -> str:
 
     raise LLMError(
         "Could not obtain a Copilot API token.\n"
-        "The token exchange requires Copilot OAuth scope.  Try one of:\n"
-        "  1. Open VS Code with the GitHub Copilot extension installed and\n"
-        "     sign in — this writes a properly-scoped token to\n"
-        "     ~/.config/github-copilot/hosts.json which is used automatically.\n"
-        "  2. Create a classic PAT at https://github.com/settings/tokens\n"
-        "     and set LLM_API_KEY=<pat> in a .env file.\n"
-        "  3. Set LLM_PROVIDER=github_models in .env to use GitHub Models\n"
-        "     instead (separate free-tier quota)."
+        "The token exchange requires a GitHub token with Copilot access.\n"
+        "In a devcontainer, the easiest fix is to let VS Code install the\n"
+        "GitHub Copilot extension (github.copilot) — it is now listed in\n"
+        "devcontainer.json and will be installed automatically on rebuild.\n"
+        "After VS Code installs it, sign in once and the token is available.\n\n"
+        "Alternatively, set LLM_PROVIDER=github_models in .env to use the\n"
+        "GitHub Models API (separate free-tier product) instead."
     )
 
 
