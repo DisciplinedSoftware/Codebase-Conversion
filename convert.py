@@ -261,6 +261,7 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
         crate_dir=crate_dir,
         build_ok=build_ok,
         test_ok=test_ok,
+        open_browser=False,
     )
     console.print(f"  [green]Markdown:[/green]  {md_path}")
     console.print(f"  [green]HTML:[/green]      {html_path}")

@@ -50,7 +50,13 @@
   },
 
   // Forward no ports by default; add entries here if you add a web UI later.
-  "forwardPorts": [],
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": {
+      "label": "Report Server",
+      "onAutoForward": "notify"
+    }
+  },
 
   // Environment variables available inside the container.
   // Set LLM_API_KEY via a .env file or a Codespaces secret — never hardcode.

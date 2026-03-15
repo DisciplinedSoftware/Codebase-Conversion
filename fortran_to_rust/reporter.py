@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import datetime
 import html as html_lib
+import http.server
+import os
+import threading
 import webbrowser
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -160,12 +163,58 @@ def generate_report(
     )
 
     if open_browser:
+        _serve_report(html_path)
+
+    return report_path, html_path
+
+
+# ---------------------------------------------------------------------------
+# HTTP report server (devcontainer / headless-friendly)
+# ---------------------------------------------------------------------------
+
+_SERVE_PORT = 8080
+
+
+def _serve_report(html_path: Path, port: int = _SERVE_PORT) -> None:
+    """Serve the reports directory over HTTP on *port* and block until Ctrl+C.
+
+    VS Code automatically detects the open port and offers to forward it to
+    the host browser, so this works seamlessly inside devcontainers and
+    GitHub Codespaces.  Falls back to ``webbrowser.open`` on regular desktops.
+    """
+    reports_dir = html_path.parent
+
+    class _Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(reports_dir), **kwargs)
+
+        def log_message(self, fmt, *args):  # silence access log noise
+            pass
+
+    # Try the HTTP server first; if the port is busy fall back to webbrowser.
+    try:
+        server = http.server.HTTPServer(("0.0.0.0", port), _Handler)
+    except OSError:
+        # Port already in use — try to open the browser directly.
         try:
             webbrowser.open(html_path.as_uri())
         except Exception:
-            pass  # headless / CI environment — silently skip
+            pass
+        return
 
-    return report_path, html_path
+    url = f"http://localhost:{port}/{html_path.name}"
+    print(f"\n  📄 Report: {url}")
+    print(f"     (VS Code will auto-forward port {port} — or open the URL above)")
+    print("     Press Ctrl+C to stop the report server.\n")
+
+    # In VS Code the port-forwarding notification appears as soon as the
+    # socket is bound.  Serve until the user interrupts.
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 # ---------------------------------------------------------------------------
