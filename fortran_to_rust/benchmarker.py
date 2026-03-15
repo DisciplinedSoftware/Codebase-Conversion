@@ -402,7 +402,7 @@ def run_benchmark(
     )
     if datasets_dir is None:
         if crate_dir:
-            datasets_dir = crate_dir / "datasets"
+            datasets_dir = crate_dir.parent / "datasets"
         elif fortran_keep_dir:
             datasets_dir = fortran_keep_dir / "datasets"
         else:

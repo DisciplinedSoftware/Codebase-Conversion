@@ -909,11 +909,11 @@ def run_accuracy_check(
 
     # Resolve a stable directory for dataset files so both the Fortran driver
     # and the Rust example binary can find them by absolute path.
-    # Prefer an explicitly supplied datasets_dir (e.g. report root / "datasets")
-    # so all functions share one location independent of crate layout.
+    # Default to the parent of the crate (= run_dir), keeping datasets at the
+    # report root rather than buried inside the Rust crate directory.
     if datasets_dir is None:
         if crate_dir:
-            datasets_dir = crate_dir / "datasets"
+            datasets_dir = crate_dir.parent / "datasets"
         elif fortran_keep_dir:
             datasets_dir = fortran_keep_dir / "datasets"
         else:
