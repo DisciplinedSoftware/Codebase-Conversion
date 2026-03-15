@@ -138,10 +138,16 @@ def _generate_fortran_bench(
 
     The dataset file is read **before** the timed ``DO`` loop so that I/O does
     not inflate the benchmark measurement.
+
+    For Fortran assumed-size (``*``) array dimensions, ``max(assigned_dims)``
+    is used as the upper bound so that declared array sizes are large enough
+    for the actual integer arguments being passed.
     """
     decl_lines: List[str] = []
     read_lines: List[str] = []
     const_lines: List[str] = []
+
+    star_fallback = max(assigned_dims.values(), default=4)
 
     # Iterate arg_names in order to match the dataset file layout.
     int_scalars  = [n.upper() for n in arg_names
@@ -166,7 +172,7 @@ def _generate_fortran_bench(
     if dp_scalars:
         decl_lines.append("      DOUBLE PRECISION " + ", ".join(dp_scalars))
     for arr_name, decl in array_args:
-        sizes = _array_size(decl, assigned_dims)
+        sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
         if sizes:
             dim_str = ", ".join(str(s) for s in sizes)
             decl_lines.append(f"      DOUBLE PRECISION {arr_name}({dim_str})")
@@ -184,7 +190,7 @@ def _generate_fortran_bench(
         if not decl.is_array:
             read_lines.append(f"      READ(99,*) {upper}")
         else:
-            sizes = _array_size(decl, assigned_dims)
+            sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
             if not sizes:
                 continue
             if len(sizes) == 1:
@@ -243,8 +249,17 @@ def _run_fortran_bench(
         exe = keep_dir / fn_stem
         lock = _get_fortran_lock(str(exe))
         with lock:
-            if not exe.exists():
+            # Recompile whenever the generated source has changed (e.g. after
+            # a dimension increase) so the binary always matches the dataset.
+            needs_compile = (
+                not exe.exists()
+                or not bench_f.exists()
+                or bench_f.read_text() != bench_src
+            )
+            if needs_compile:
                 bench_f.write_text(bench_src)
+                if exe.exists():
+                    exe.unlink()
                 cmd = ["gfortran", "-O2", "-ffixed-line-length-none",
                        "-o", str(exe), str(bench_f)]
                 cmd += [str(s) for s in extra_sources]
@@ -319,11 +334,16 @@ def _generate_rust_bench(
 
     The dataset file is read **before** ``Instant::now()`` so that I/O does not
     inflate the benchmark measurement.
+
+    For Fortran assumed-size (``*``) array dimensions, ``max(assigned_dims)``
+    is used as the upper bound so that ``Vec`` allocations are large enough
+    for the actual integer arguments being passed.
     """
     fn_lower = routine_name.lower()
     examples_dir = crate_dir / "examples"
     examples_dir.mkdir(exist_ok=True)
 
+    star_fallback = max(assigned_dims.values(), default=4)
     inputs: List[str] = []
     call_args: List[str] = []
 
@@ -340,9 +360,9 @@ def _generate_rust_bench(
             inputs.append(f"    let {rname}: f64 = _ds.next().unwrap();")
             call_args.append(rname)
         elif decl.is_real and decl.is_array:
-            sizes = _array_size(decl, assigned_dims)
+            sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
             total = 1
-            for s in (sizes or [4]):
+            for s in (sizes or [star_fallback]):
                 total *= s
             inputs.append(
                 f"    let mut {rname}: Vec<f64> = (0..{total}).map(|_| _ds.next().unwrap()).collect();"
@@ -454,7 +474,9 @@ def run_benchmark(
     datasets_dir.mkdir(parents=True, exist_ok=True)
 
     fn_lower = fn.lower()
-    dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=0)
+    star_fallback = max(assigned_dims.values(), default=4)
+    dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=0,
+                               star_fallback=star_fallback)
     dataset_path = datasets_dir / f"{fn_lower}_bench.txt"
     write_dataset_file(dataset, dataset_path)
 
