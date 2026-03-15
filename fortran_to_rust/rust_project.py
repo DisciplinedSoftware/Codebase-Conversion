@@ -47,7 +47,7 @@ _LIB_RS_HEADER = """\
 #![allow(clippy::all, non_snake_case, unused_variables, dead_code)]
 """
 
-_MAX_CRATE_REPAIR_ROUNDS = 3
+_MAX_CRATE_REPAIR_ROUNDS = 5
 
 
 def scaffold_crate(
