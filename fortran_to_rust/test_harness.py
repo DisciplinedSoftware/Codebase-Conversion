@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from fortran_to_rust.rust_project import get_crate_lib_name
+
 _TOLERANCE = 1e-10  # max acceptable absolute error
 
 # Per-file-stem locks prevent multiple threads from compiling the same Fortran
@@ -615,7 +617,7 @@ def _generate_rust_example(
 ) -> bool:
     """Write a Rust example binary that mirrors the Fortran test driver."""
     fn_lower = routine_name.lower()
-    crate_name = crate_dir.name
+    crate_name = get_crate_lib_name(crate_dir)
     examples_dir = crate_dir / "examples"
     examples_dir.mkdir(exist_ok=True)
 
@@ -673,11 +675,18 @@ def _compile_run_rust_example(
     routine_name: str,
 ) -> Optional[List[float]]:
     """Compile and run the Rust accuracy example; return printed floats or None."""
+    import shutil
+
+    if not shutil.which("cargo"):
+        return None
     fn_lower = routine_name.lower()
-    result = subprocess.run(
-        ["cargo", "build", "--release", "--example", f"accuracy_{fn_lower}"],
-        capture_output=True, text=True, cwd=crate_dir, timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            ["cargo", "build", "--release", "--example", f"accuracy_{fn_lower}"],
+            capture_output=True, text=True, cwd=crate_dir, timeout=120,
+        )
+    except FileNotFoundError:
+        return None
     if result.returncode != 0:
         return None
     exe = crate_dir / "target" / "release" / "examples" / f"accuracy_{fn_lower}"

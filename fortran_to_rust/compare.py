@@ -80,7 +80,7 @@ def run_strategy_worker(
             acc = run_accuracy_check(
                 fn,
                 src_path,
-                crate_dir if build_ok else None,
+                crate_dir,
                 routine=routine,
                 fortran_ref_dir=fortran_ref_dir,
             )
@@ -94,7 +94,7 @@ def run_strategy_worker(
             bench = run_benchmark(
                 fn,
                 src_path,
-                crate_dir if build_ok else None,
+                crate_dir,
                 routine=routine,
                 fortran_ref_dir=fortran_ref_dir,
             )
