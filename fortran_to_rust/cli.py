@@ -137,9 +137,20 @@ def run(output_dir: Path) -> None:
         stream_cb, stream_state = _make_stream_cb(fn_name)
         llm.stream_callback = stream_cb
 
-        result = strategy.convert(routine, progress_callback=_make_cb())
-        if stream_state["started"]:
-            console.print()  # newline after streamed output
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task(
+                f"  [bold cyan]{fn_name}[/bold cyan] — [dim]LLM thinking…[/dim]"
+            )
+            stream_state["progress"] = progress
+            stream_state["task"] = task
+            result = strategy.convert(routine, progress_callback=_make_cb())
+
         conversion_results.append(result)
 
         if result.success:
@@ -368,20 +379,25 @@ def _run_with_spinner(label: str, fn, *args, **kwargs):
 
 
 def _make_stream_cb(fn_name: str):
-    """Return a (callback, state) pair that writes LLM token chunks to the console live.
+    """Return a (callback, state) pair for an LLM Progress spinner.
 
-    The header ``LLM output ↓`` is printed only on the first token so it never
-    appears for non-LLM strategies or when the LLM is unavailable.
+    The callback updates the token counter in the task description each time
+    a new chunk arrives.  Callers must attach the state dict's ``progress``
+    and ``task`` keys before the LLM call begins.
     """
-    import sys
-    state: dict = {"started": False}
+    state: dict = {"progress": None, "task": None, "tokens": 0}
 
     def cb(chunk: str) -> None:
-        if not state["started"]:
-            console.print(f"\n  [dim][{fn_name}] LLM output ↓[/dim]")
-            state["started"] = True
-        sys.stdout.write(chunk)
-        sys.stdout.flush()
+        state["tokens"] += 1
+        p, t = state.get("progress"), state.get("task")
+        if p is not None and t is not None:
+            p.update(
+                t,
+                description=(
+                    f"  [bold cyan]{fn_name}[/bold cyan] — "
+                    f"[dim]LLM thinking… ({state['tokens']} tokens)[/dim]"
+                ),
+            )
 
     return cb, state
 

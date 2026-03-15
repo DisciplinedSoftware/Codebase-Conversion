@@ -140,20 +140,24 @@ def _make_progress_callback(fn_name: str, messages: list[str], console):  # type
 
 
 def _make_stream_cb(fn_name: str, console):  # type: ignore[type-arg]
-    """Return a stream callback that writes LLM tokens to the console live.
+    """Return a (callback, state) pair for an LLM Progress spinner.
 
-    Prints a header on first token and a trailing newline when the stream ends
-    via a simple stateful closure.
+    The callback increments the token counter and updates the spinner
+    description on each arriving chunk — no raw LLM output is printed.
+    Callers must set state['progress'] and state['task'] before the LLM call.
     """
-    import sys
-    state = {"started": False}
+    state: dict = {"progress": None, "task": None, "tokens": 0}
 
     def cb(chunk: str) -> None:
-        if not state["started"]:
-            console.print(f"  [{fn_name}] [dim]LLM output ↓[/dim]")
-            state["started"] = True
-        sys.stdout.write(chunk)
-        sys.stdout.flush()
+        state["tokens"] += 1
+        p, t = state.get("progress"), state.get("task")
+        if p is not None and t is not None:
+            p.update(
+                t,
+                description=(
+                    f"  [{fn_name}] [dim]LLM thinking… ({state['tokens']} tokens)[/dim]"
+                ),
+            )
 
     return cb, state
 
@@ -238,9 +242,10 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     # --- 4. Convert ---
     console.print(f"\n[bold]Converting with strategy {strategy_key}…[/bold]")
     StrategyClass = STRATEGY_MAP[strategy_key]
-    stream_cb, stream_state = _make_stream_cb("stream", console)
-    llm = LLMClient(stream_callback=stream_cb)
+    llm = LLMClient()
     strategy = StrategyClass(output_dir, llm=llm)
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
     conversion_results = []
     for fn in functions_to_convert:
@@ -254,9 +259,18 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
         llm.stream_callback = stream_cb
         cb = _make_progress_callback(fn, messages, console)
 
-        result = strategy.convert(routine, progress_callback=cb)
-        if stream_state["started"]:
-            console.print()  # newline after streamed output
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task(f"  [{fn}] [dim]LLM thinking…[/dim]")
+            stream_state["progress"] = progress
+            stream_state["task"] = task
+            result = strategy.convert(routine, progress_callback=cb)
+
         conversion_results.append(result)
         status = "[green]✓[/green]" if result.success else "[red]✗[/red]"
         console.print(f"  {status} {fn} — {result.strategy_used}")
