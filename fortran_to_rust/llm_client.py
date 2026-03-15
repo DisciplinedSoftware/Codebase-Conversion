@@ -45,6 +45,12 @@ _REQUEST_TIMEOUT = 120  # seconds
 _GH_CLI_TIMEOUT = 8  # seconds — gh auth token should respond quickly
 
 
+def _warn(msg: str) -> None:
+    """Print a warning to stderr immediately (visible even mid-stream)."""
+    import sys
+    print(f"\n[LLM] {msg}", file=sys.stderr, flush=True)
+
+
 class LLMError(Exception):
     """Raised when the LLM call fails unrecoverably."""
 
@@ -241,7 +247,11 @@ class LLMClient:
             "stream": streaming,
         }
 
+        _MAX_RATE_LIMIT_WAIT = 30  # seconds — never sleep longer than this per attempt
+        _MAX_RATE_LIMIT_RETRIES = 5
+
         last_exc: Optional[Exception] = None
+        rate_limit_hits = 0
         for attempt in range(retry + 1):
             try:
                 resp = requests.post(
@@ -252,7 +262,21 @@ class LLMClient:
                     stream=streaming,
                 )
                 if resp.status_code == 429:
-                    wait = int(resp.headers.get("Retry-After", "5"))
+                    rate_limit_hits += 1
+                    raw_wait = resp.headers.get("Retry-After", "5")
+                    wait = min(int(raw_wait), _MAX_RATE_LIMIT_WAIT)
+                    # Always drain/close the response body before sleeping so
+                    # the connection is returned to the pool immediately.
+                    resp.close()
+                    _warn(
+                        f"Rate limited (429) — waiting {wait}s "
+                        f"[attempt {rate_limit_hits}/{_MAX_RATE_LIMIT_RETRIES}] …"
+                    )
+                    if rate_limit_hits >= _MAX_RATE_LIMIT_RETRIES:
+                        raise LLMError(
+                            f"Rate limited {rate_limit_hits} times in a row. "
+                            "Check your API quota or try again later."
+                        )
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
@@ -261,8 +285,11 @@ class LLMClient:
                     return self._consume_stream(resp)
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
+            except LLMError:
+                raise
             except (requests.RequestException, KeyError, ValueError) as exc:
                 last_exc = exc
+                _warn(f"Request error (attempt {attempt + 1}/{retry + 1}): {exc}")
                 if attempt < retry:
                     time.sleep(2 ** attempt)
 
