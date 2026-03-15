@@ -58,6 +58,7 @@ def generate_comparison_report(
     lines: List[str] = []
     _section = lambda title: lines.extend([f"\n## {title}\n"])
 
+    lines.append(_MD_BENTLEY_BANNER)
     lines.append("# Fortran-to-Rust Comparison Report")
     lines.append(f"\n**Library:** {library}  ")
     lines.append("**Strategies:** All (1 · LLM-First, 2 · Agentic, 3 · Hybrid)  ")
@@ -175,6 +176,7 @@ def _write_comparison_html_report(
         f"<title>Fortran→Rust Comparison — {_esc(library)}</title>",
         f"<style>{_HTML_CSS}</style>",
         "</head><body>",
+        _HTML_BENTLEY_HEADER,
         "<h1>Fortran→Rust Comparison Report</h1>",
         "<div class='summary-grid'>",
         f"<div class='card'><div class='card-label'>Library</div><div class='card-value'>{_esc(library)}</div></div>",
@@ -333,6 +335,7 @@ def generate_report(
     _section = lambda title: lines.extend([f"\n## {title}\n"])
 
     # ---- Header ----
+    lines.append(_MD_BENTLEY_BANNER)
     lines.append(f"# Fortran-to-Rust Conversion Report")
     lines.append(f"\n**Library:** {library}  ")
     lines.append(f"**Strategy:** {strategy_name}  ")
@@ -504,27 +507,49 @@ def _serve_report(html_path: Path, port: int = _SERVE_PORT) -> None:
 # HTML report
 # ---------------------------------------------------------------------------
 
+# Bentley Systems brand palette
+# Primary Green: #62BB47 | Dark (Cinder): #020204 | White: #FFFFFF
 _HTML_CSS = """\
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
-  max-width:1100px;margin:40px auto;padding:0 24px;background:#0d1117;color:#c9d1d9;line-height:1.6}
-h1{color:#58a6ff;border-bottom:2px solid #21262d;padding-bottom:12px}
-h2{color:#79c0ff;margin-top:32px;border-bottom:1px solid #21262d;padding-bottom:6px}
-h3{color:#d2a8ff}
+  max-width:1100px;margin:40px auto;padding:0 24px;background:#ffffff;color:#020204;line-height:1.6}
+h1{color:#62BB47;border-bottom:3px solid #62BB47;padding-bottom:12px}
+h2{color:#020204;margin-top:32px;border-bottom:2px solid #62BB47;padding-bottom:6px}
+h3{color:#3a7029}
 table{width:100%;border-collapse:collapse;margin:16px 0}
-th{background:#161b22;color:#58a6ff;text-align:left;padding:8px 12px;border:1px solid #21262d}
-td{padding:8px 12px;border:1px solid #21262d}
-tr:nth-child(even){background:#161b22}
-code,pre{background:#161b22;border:1px solid #21262d;border-radius:6px;font-family:'SFMono-Regular',Consolas,monospace;font-size:13px}
+th{background:#62BB47;color:#ffffff;text-align:left;padding:8px 12px;border:1px solid #c8e6bf}
+td{padding:8px 12px;border:1px solid #c8e6bf}
+tr:nth-child(even){background:#f2faee}
+code,pre{background:#f2faee;border:1px solid #c8e6bf;border-radius:6px;font-family:'SFMono-Regular',Consolas,monospace;font-size:13px}
 code{padding:2px 6px}
 pre{padding:16px;overflow-x:auto}
-.ok{color:#3fb950}.fail{color:#f85149}.dim{color:#8b949e}
-.badge-ok{background:#1f6feb;color:#fff;padding:2px 8px;border-radius:20px}
-.badge-fail{background:#da3633;color:#fff;padding:2px 8px;border-radius:20px}
+.ok{color:#3a7029}.fail{color:#c0392b}.dim{color:#555555}
+.badge-ok{background:#62BB47;color:#ffffff;padding:2px 8px;border-radius:20px}
+.badge-fail{background:#c0392b;color:#ffffff;padding:2px 8px;border-radius:20px}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:16px 0}
-.card{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px}
-.card-label{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:.05em}
-.card-value{font-size:24px;font-weight:700;margin-top:4px}
+.card{background:#f2faee;border:2px solid #62BB47;border-radius:8px;padding:16px}
+.card-label{font-size:12px;color:#3a7029;text-transform:uppercase;letter-spacing:.05em}
+.card-value{font-size:24px;font-weight:700;margin-top:4px;color:#020204}
 """
+
+# Bentley Systems brand banner for Markdown reports.
+# Uses inline HTML (rendered by GitHub, GitLab, most static-site generators).
+_MD_BENTLEY_BANNER = (
+    '<div style="background:#62BB47;padding:8px 16px;border-radius:6px;'
+    'margin-bottom:16px;display:inline-block">'
+    '<span style="color:#ffffff;font-weight:700;font-size:14px;'
+    'letter-spacing:.05em">BENTLEY SYSTEMS</span>'
+    '</div>\n'
+)
+
+# Bentley Systems brand header bar for HTML reports.
+_HTML_BENTLEY_HEADER = (
+    "<div style='background:#62BB47;margin:-0px -24px 24px;padding:10px 24px;"
+    "display:flex;align-items:center;gap:12px'>"
+    "<span style='color:#ffffff;font-weight:700;font-size:15px;"
+    "letter-spacing:.06em'>BENTLEY SYSTEMS</span>"
+    "<span style='color:#ffffff;opacity:.7;font-size:13px'>Fortran → Rust</span>"
+    "</div>"
+)
 
 
 def _esc(s: str) -> str:
@@ -561,6 +586,7 @@ def _write_html_report(
         f"<title>Fortran→Rust Report — {_esc(library)}</title>",
         f"<style>{_HTML_CSS}</style>",
         "</head><body>",
+        _HTML_BENTLEY_HEADER,
         f"<h1>Fortran→Rust Conversion Report</h1>",
         "<div class='summary-grid'>",
         f"<div class='card'><div class='card-label'>Library</div><div class='card-value'>{_esc(library)}</div></div>",
