@@ -66,6 +66,11 @@ _STRATEGY_DESCRIPTIONS = {
         "  Deterministic f2c skeleton first, then optional LLM polishing pass.  "
         "Works fully offline; LLM polish is applied if a key is available."
     ),
+    "all": (
+        "[bold]All strategies in parallel[/bold]\n"
+        "  Run strategies 1, 2, and 3 simultaneously, each in its own output "
+        "folder, then display a side-by-side comparison report."
+    ),
 }
 
 
@@ -104,6 +109,11 @@ def run(output_dir: Path) -> None:
 
     # --- 4. LLM configuration (if needed) -------------------------------------
     llm = _configure_llm(strategy_key)
+
+    # --- 4b. Parallel comparison mode ----------------------------------------
+    if strategy_key == "all":
+        _run_all_parallel_interactive(output_dir, functions_to_convert, source_map)
+        return
 
     # --- 5. Call graph --------------------------------------------------------
     console.print()
@@ -227,6 +237,77 @@ def run(output_dir: Path) -> None:
 # Wizard helpers
 # ---------------------------------------------------------------------------
 
+def _run_all_parallel_interactive(
+    output_dir: Path,
+    functions_to_convert: List[str],
+    source_map: Dict[str, Path],
+) -> None:
+    """Run all three strategies in parallel using pre-fetched source data."""
+    from fortran_to_rust.compare import (
+        make_compare_dir,
+        print_comparison_table,
+        run_all_parallel,
+        write_comparison_report,
+    )
+    from fortran_to_rust.parser import parse_file
+
+    console.print()
+    console.print(Panel("[bold]Running all 3 strategies in parallel…[/bold]", style="cyan"))
+
+    compare_dir = make_compare_dir(output_dir)
+    console.print(f"  [dim]Compare directory: {compare_dir}[/dim]")
+
+    # Parse sources (needed by workers)
+    all_routines = []
+    for path in source_map.values():
+        all_routines.extend(parse_file(path))
+    routine_map = {r.name.upper(): r for r in all_routines}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        tasks = {
+            key: progress.add_task(
+                f"  [cyan]Strategy {key}[/cyan] ({STRATEGY_NAMES[key]}): Starting…"
+            )
+            for key in ("1", "2", "3")
+        }
+
+        def _make_update(key: str):
+            def _update(msg: str) -> None:
+                progress.update(
+                    tasks[key],
+                    description=(
+                        f"  [cyan]Strategy {key}[/cyan] ({STRATEGY_NAMES[key]}): {msg}"
+                    ),
+                )
+            return _update
+
+        all_results = run_all_parallel(
+            output_dir=output_dir,
+            compare_dir=compare_dir,
+            functions_to_convert=functions_to_convert,
+            source_map=source_map,
+            routine_map=routine_map,
+            progress_update=lambda key, msg: _make_update(key)(msg),
+        )
+
+    console.print(Rule("[bold cyan]Comparison Summary[/bold cyan]", style="cyan"))
+    print_comparison_table(console, all_results)
+
+    report_path = write_comparison_report(compare_dir, all_results)
+    console.print(f"\n  Comparison report: [bold green]{report_path}[/bold green]")
+    for key in ("1", "2", "3"):
+        html = all_results.get(key, {}).get("html_path")
+        if html:
+            console.print(f"  Strategy {key} HTML:  [green]{html}[/green]")
+    console.print(Rule(style="cyan"))
+
+
 def _ask_library() -> str:
     console.print("\n[bold]Which library would you like to convert?[/bold]")
     console.print("  [cyan]1[/cyan]  BLAS (Basic Linear Algebra Subprograms) — Fortran reference implementation")
@@ -332,7 +413,9 @@ def _ask_strategy() -> str:
     for key, desc in _STRATEGY_DESCRIPTIONS.items():
         console.print(f"  [cyan]{key}[/cyan]  {desc}\n")
     return Prompt.ask(
-        "[bold cyan]>[/bold cyan] Strategy", choices=["1", "2", "3"], default="3"
+        "[bold cyan]>[/bold cyan] Strategy",
+        choices=["1", "2", "3", "all"],
+        default="3",
     )
 
 
@@ -353,9 +436,12 @@ def _configure_llm(strategy_key: str) -> LLMClient:
         return configured
 
     # Still no auth after setup (user skipped or setup failed)
-    if strategy_key in ("1", "2"):
+    if strategy_key in ("1", "2", "all"):
         console.print(
             "\n  [yellow]⚠[/yellow] No LLM available — "
+            "strategies 1 and 2 will fall back to rule-based conversion."
+            if strategy_key == "all"
+            else "\n  [yellow]⚠[/yellow] No LLM available — "
             "switching to Strategy 3 (Hybrid rule-based only)."
         )
     else:

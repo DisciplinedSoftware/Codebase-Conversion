@@ -14,6 +14,9 @@ Options
                         integer for a random sample of that size.
                         Defaults to "dgemm" when --non-interactive is used.
   --strategy {1,2,3}   Conversion strategy (default: 3 = Hybrid Rule-Based).
+  --compare             Run all 3 strategies in parallel, each in its own
+                        sub-directory, then emit a side-by-side comparison
+                        report.  Implies --non-interactive.
 
 Environment variables
 ---------------------
@@ -94,12 +97,23 @@ def main() -> None:
         default="3",
         help="Conversion strategy: 1=LLM-First, 2=Agentic, 3=Hybrid (default: 3).",
     )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "Run all 3 strategies in parallel, each in its own sub-directory "
+            "under output/compare_YYYYMMDD_HHMMSS/, then emit a side-by-side "
+            "comparison report.  Implies --non-interactive."
+        ),
+    )
     args = parser.parse_args()
 
     output_dir: Path = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.non_interactive:
+    if args.compare:
+        _run_compare(output_dir, args.functions)
+    elif args.non_interactive:
         _run_non_interactive(output_dir, args.functions, args.strategy)
     else:
         from fortran_to_rust.cli import run
@@ -338,6 +352,111 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     )
     console.print(f"  [green]Markdown:[/green]  {md_path}")
     console.print(f"  [green]HTML:[/green]      {html_path}")
+    console.print(Rule(style="cyan"))
+
+
+def _run_compare(output_dir: Path, functions_arg: str) -> None:
+    """Run all 3 strategies in parallel and produce a side-by-side comparison."""
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    from rich.rule import Rule
+
+    from fortran_to_rust.call_graph import build_call_graph, render_graph
+    from fortran_to_rust.compare import (
+        make_compare_dir,
+        print_comparison_table,
+        run_all_parallel,
+        write_comparison_report,
+    )
+    from fortran_to_rust.fetcher import fetch_blas
+    from fortran_to_rust.parser import parse_file
+    from fortran_to_rust.strategies import STRATEGY_NAMES
+
+    console = Console()
+    console.print(Rule("[bold cyan]Fortran-to-Rust  (compare all strategies)[/bold cyan]"))
+
+    compare_dir = make_compare_dir(output_dir)
+    console.print(f"  [dim]Compare directory: {compare_dir}[/dim]")
+
+    # --- 1. Resolve function list ---
+    functions_to_convert = _parse_functions_arg(functions_arg)
+    support_fns = ["lsame", "xerbla"]
+    fetch_list = list(dict.fromkeys(functions_to_convert + support_fns))
+
+    console.print(
+        f"\n[bold]Converting:[/bold] {', '.join(functions_to_convert)}  "
+        "[dim](all 3 strategies in parallel)[/dim]"
+    )
+
+    # --- 2. Fetch sources (shared across all strategies) ---
+    console.print("\n[bold]Fetching BLAS sources…[/bold]")
+    source_map = fetch_blas(output_dir, functions=fetch_list)
+
+    missing = [fn for fn in functions_to_convert if fn not in source_map]
+    if missing:
+        console.print(f"[yellow]⚠[/yellow] Could not fetch: {', '.join(missing)}")
+        functions_to_convert = [fn for fn in functions_to_convert if fn in source_map]
+    if not functions_to_convert:
+        console.print("[red]No fetchable functions — aborting.[/red]")
+        sys.exit(1)
+
+    # --- 3. Parse (shared) ---
+    console.print("[bold]Parsing…[/bold]")
+    all_routines = []
+    for path in source_map.values():
+        all_routines.extend(parse_file(path))
+    routine_map = {r.name.upper(): r for r in all_routines}
+
+    graph = build_call_graph(all_routines)
+    console.print(f"  [dim]Call graph:[/dim]\n{render_graph(graph)}")
+
+    # --- 4. Run all 3 strategies in parallel ---
+    console.print("\n[bold]Running all 3 strategies in parallel…[/bold]")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        tasks = {
+            key: progress.add_task(
+                f"  [cyan]Strategy {key}[/cyan] ({STRATEGY_NAMES[key]}): Starting…"
+            )
+            for key in ("1", "2", "3")
+        }
+
+        def _make_update(key: str):
+            def _update(msg: str) -> None:
+                progress.update(
+                    tasks[key],
+                    description=(
+                        f"  [cyan]Strategy {key}[/cyan] ({STRATEGY_NAMES[key]}): {msg}"
+                    ),
+                )
+            return _update
+
+        all_results = run_all_parallel(
+            output_dir=output_dir,
+            compare_dir=compare_dir,
+            functions_to_convert=functions_to_convert,
+            source_map=source_map,
+            routine_map=routine_map,
+            progress_update=lambda key, msg: _make_update(key)(msg),
+        )
+
+    # --- 5. Print comparison table ---
+    console.print(Rule("[bold cyan]Comparison Summary[/bold cyan]"))
+    print_comparison_table(console, all_results)
+
+    # --- 6. Write comparison report ---
+    report_path = write_comparison_report(compare_dir, all_results)
+    console.print(f"\n  Comparison report: [bold green]{report_path}[/bold green]")
+    for key in ("1", "2", "3"):
+        html = all_results.get(key, {}).get("html_path")
+        if html:
+            console.print(f"  Strategy {key} HTML:  [green]{html}[/green]")
     console.print(Rule(style="cyan"))
 
 
