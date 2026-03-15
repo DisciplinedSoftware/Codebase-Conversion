@@ -131,7 +131,7 @@ def prompt_auth_setup(console: Console) -> Optional["LLMClient"]:  # type: ignor
             console.print(
                 "  Enter your GitHub Personal Access Token or OpenAI API key.\n"
                 "  [dim]GitHub PAT: https://github.com/settings/tokens  "
-                "(requires [bold]models:read[/bold] scope or a classic PAT)[/dim]"
+                "(no special scopes required — any valid GitHub token works)[/dim]"
             )
             key = Prompt.ask("  [bold cyan]>[/bold cyan] API key", password=True).strip()
             if not key:

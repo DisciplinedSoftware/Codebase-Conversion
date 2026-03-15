@@ -123,7 +123,7 @@ setup_env_file() {
     if [[ -t 0 ]]; then
         echo -e "${YELLOW}Enter your GitHub Personal Access Token (or OpenAI API key).${NC}"
         echo    "  • GitHub PAT — visit https://github.com/settings/tokens and create a"
-        echo    "    token with at least 'models:read' scope (or use a classic PAT)."
+        echo    "    No special scopes are required — any valid GitHub PAT works."
         echo    "  • OpenAI key — starts with sk-"
         echo
         read -rsp "  API key (input hidden): " api_key
