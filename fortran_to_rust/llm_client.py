@@ -105,8 +105,8 @@ _copilot_cache = _CopilotTokenCache()
 def _exchange_token(github_token: str) -> Optional[str]:
     """Try to exchange *github_token* for a Copilot API token via GET.
 
-    Returns the Copilot bearer token string, or None on non-fatal failure
-    (4xx errors).  Raises LLMError only on network/unexpected errors.
+    Returns the Copilot bearer token string, or None on non-fatal failure.
+    Prints a diagnostic line so the caller can see why it failed.
     """
     try:
         resp = requests.get(
@@ -120,12 +120,20 @@ def _exchange_token(github_token: str) -> Optional[str]:
             },
             timeout=15,
         )
-        if resp.status_code in (401, 403, 404):
-            return None  # token doesn't have Copilot scope — try next candidate
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("token")
-    except requests.RequestException:
+        if resp.status_code == 200:
+            data = resp.json()
+            tok = data.get("token")
+            if tok:
+                return tok
+            _warn(f"Copilot exchange 200 but no 'token' in response: {data}")
+            return None
+        # Surface the failure so the user (and developer) can see why
+        _warn(
+            f"Copilot token exchange failed: HTTP {resp.status_code} — {resp.text[:200]}"
+        )
+        return None
+    except requests.RequestException as exc:
+        _warn(f"Copilot token exchange network error: {exc}")
         return None
 
 
@@ -135,11 +143,9 @@ def _get_copilot_bearer(github_token: str) -> str:
     Token discovery order:
     1. In-memory cache (reuse until expiry).
     2. VS Code / Copilot extension credential store
-       (~/.config/github-copilot/hosts.json) — written by the github.copilot
-       VS Code extension; this token has the Copilot OAuth scope.
-    3. GITHUB_TOKEN env var — set automatically in GitHub Codespaces with
-       Copilot access when the subscription is linked to the organisation.
-    4. The supplied *github_token* — works for classic PATs with Copilot access.
+       (~/.config/github-copilot/hosts.json).
+    3. GITHUB_TOKEN env var (GitHub Codespaces).
+    4. The supplied *github_token* (gh auth token / LLM_API_KEY).
 
     Raises LLMError if no exchange succeeds.
     """
@@ -157,16 +163,7 @@ def _get_copilot_bearer(github_token: str) -> str:
             _copilot_cache.set(token, "")
             return token
 
-    raise LLMError(
-        "Could not obtain a Copilot API token.\n"
-        "The token exchange requires a GitHub token with Copilot access.\n"
-        "In a devcontainer, the easiest fix is to let VS Code install the\n"
-        "GitHub Copilot extension (github.copilot) — it is now listed in\n"
-        "devcontainer.json and will be installed automatically on rebuild.\n"
-        "After VS Code installs it, sign in once and the token is available.\n\n"
-        "Alternatively, set LLM_PROVIDER=github_models in .env to use the\n"
-        "GitHub Models API (separate free-tier product) instead."
-    )
+    raise LLMError("Copilot token exchange failed for all candidates (see warnings above).")
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +280,11 @@ class LLMClient:
         # Load .env before reading any env vars
         _load_dotenv()
 
-        # Default to "github_models" — accepts the raw GitHub token from
-        # `gh auth token` directly as a Bearer, no token exchange required.
-        # Set LLM_PROVIDER=copilot to use the Copilot endpoint instead (needs
-        # a token with Copilot OAuth scope, e.g. from the VS Code extension).
-        self.provider = (provider or os.environ.get("LLM_PROVIDER", "github_models")).lower()
+        # Default to "copilot" — exchanges the GitHub token for a Copilot API
+        # bearer so Copilot subscribers use their paid quota.  Falls back to
+        # github_models (raw bearer, free tier) if the exchange fails.
+        # Override with LLM_PROVIDER=github_models in .env to skip the exchange.
+        self.provider = (provider or os.environ.get("LLM_PROVIDER", "copilot")).lower()
 
         self.api_key = api_key or _resolve_api_key(self.provider)
         self.model = model or os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
