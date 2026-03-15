@@ -318,11 +318,23 @@ class LLMClient:
         }
         if self.api_key:
             if self.provider == "copilot":
-                # Exchange GitHub token for short-lived Copilot bearer token
-                bearer = _get_copilot_bearer(self.api_key)
-                headers["Authorization"] = f"Bearer {bearer}"
-                headers["Editor-Version"] = "vscode/1.90.0"
-                headers["Copilot-Integration-Id"] = "vscode-chat"
+                # Try the Copilot token exchange; fall back to using the raw
+                # GitHub token directly (github_models-style) if it fails so
+                # that `gh auth token` always works regardless of provider setting.
+                try:
+                    bearer = _get_copilot_bearer(self.api_key)
+                    headers["Authorization"] = f"Bearer {bearer}"
+                    headers["Editor-Version"] = "vscode/1.90.0"
+                    headers["Copilot-Integration-Id"] = "vscode-chat"
+                    # Also switch the endpoint to github_models on fallback
+                except LLMError:
+                    _warn(
+                        "Copilot token exchange failed — falling back to GitHub Models "
+                        "(models.inference.ai.azure.com) with raw token."
+                    )
+                    self.provider = "github_models"
+                    self.base_url = _GITHUB_MODELS_ENDPOINT
+                    headers["Authorization"] = f"Bearer {self.api_key}"
             else:
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
