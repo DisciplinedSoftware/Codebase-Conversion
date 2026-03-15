@@ -106,6 +106,7 @@ def generate_dataset(
     arg_decls: Dict[str, "ArgDecl"],
     assigned_dims: Dict[str, int],
     test_index: int = 0,
+    star_fallback: int = 4,
 ) -> TestDataset:
     """Generate a single ``TestDataset`` for *test_index* from the given argument info.
 
@@ -113,6 +114,12 @@ def generate_dataset(
     in order.  The same seed and iteration order are used in both
     ``generate_fortran_driver`` and ``_generate_rust_example`` so that both
     drivers are guaranteed to receive identical numerical inputs.
+
+    *star_fallback* is forwarded to :func:`_array_size` and controls how
+    Fortran assumed-size (``*``) dimensions are resolved when sizing arrays.
+    Accuracy tests use the default of 4; benchmark drivers pass a larger
+    value (typically ``max(assigned_dims.values())``) so that the dataset
+    is sized consistently with the benchmark binary's array declarations.
     """
     rng = random.Random(test_index)
     values: Dict[str, Union[float, int, bool, str, List[float]]] = {}
@@ -131,9 +138,9 @@ def generate_dataset(
         elif decl.is_real and not decl.is_array:
             values[upper] = rng.uniform(0.5, 2.0)
         elif decl.is_real and decl.is_array:
-            sizes = _array_size(decl, assigned_dims)
+            sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
             total = 1
-            for s in (sizes or [4]):
+            for s in (sizes or [star_fallback]):
                 total *= s
             values[upper] = [rng.uniform(-1.0, 1.0) for _ in range(total)]
 
@@ -304,11 +311,19 @@ def _resolve_dim(dim_str: str, assigned: Dict[str, int], fallback: int = 4) -> i
         return fallback
 
 
-def _array_size(decl: ArgDecl, assigned: Dict[str, int]) -> List[int]:
-    """Return concrete dimension sizes for an array argument."""
+def _array_size(decl: ArgDecl, assigned: Dict[str, int], fallback: int = 4) -> List[int]:
+    """Return concrete dimension sizes for an array argument.
+
+    *fallback* is used for Fortran assumed-size (``*``) dimensions and for
+    symbolic dimensions that cannot be resolved from *assigned*.  Callers
+    that need larger arrays (e.g. the benchmark driver) should pass a value
+    that matches their largest concrete dimension so that arrays are not
+    under-allocated relative to the integer scalars being passed to the
+    function under test.
+    """
     if not decl.dims:
         return []
-    return [_resolve_dim(d, assigned, fallback=4) for d in decl.dims]
+    return [_resolve_dim(d, assigned, fallback=fallback) for d in decl.dims]
 
 
 # ---------------------------------------------------------------------------

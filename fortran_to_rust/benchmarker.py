@@ -37,7 +37,45 @@ from fortran_to_rust.test_harness import (
     write_dataset_file,
 )
 
-_REPS = 10   # number of timed repetitions
+_REPS = 10        # number of timed repetitions (accuracy / quick checks)
+_BENCH_REPS = 50  # repetitions used by run_benchmark — large enough for
+                  # hundreds-of-milliseconds total timing on matrix operations
+
+# Dimension defaults for benchmark runs.  These are intentionally much larger
+# than the accuracy-test defaults in test_harness._DIM_DEFAULTS so that each
+# benchmark measures meaningful, non-trivial work (typically hundreds of ms).
+_BENCH_DIM_DEFAULTS: Dict[str, int] = {
+    "M": 256,
+    "N": 256,
+    "K": 256,
+    "LDA": 256,
+    "LDB": 256,
+    "LDC": 256,
+    "LDE": 256,
+    "LDF": 256,
+    "INCX": 1,
+    "INCY": 1,
+    "INC": 1,
+    "NRHS": 64,
+    "KL": 32,
+    "KU": 32,
+    "KB": 256,
+    "P": 128,
+    "Q": 128,
+}
+
+
+def _bench_assign_dims(arg_decls: Dict[str, "ArgDecl"]) -> Dict[str, int]:
+    """Return concrete integer values for benchmark runs using large dimensions.
+
+    Mirrors :func:`~fortran_to_rust.test_harness._assign_dims` but draws from
+    :data:`_BENCH_DIM_DEFAULTS` so that the generated dataset and benchmark
+    drivers operate on realistically-sized arrays (e.g. 256×256 matrices for
+    BLAS level-3 routines).
+    """
+    from fortran_to_rust.test_harness import _assign_dims as _base_assign_dims
+    base = _base_assign_dims(arg_decls)
+    return {name: _BENCH_DIM_DEFAULTS.get(name, val) for name, val in base.items()}
 
 
 @dataclass
@@ -100,10 +138,16 @@ def _generate_fortran_bench(
 
     The dataset file is read **before** the timed ``DO`` loop so that I/O does
     not inflate the benchmark measurement.
+
+    For Fortran assumed-size (``*``) array dimensions, ``max(assigned_dims)``
+    is used as the upper bound so that declared array sizes are large enough
+    for the actual integer arguments being passed.
     """
     decl_lines: List[str] = []
     read_lines: List[str] = []
     const_lines: List[str] = []
+
+    star_fallback = max(assigned_dims.values(), default=4)
 
     # Iterate arg_names in order to match the dataset file layout.
     int_scalars  = [n.upper() for n in arg_names
@@ -128,7 +172,7 @@ def _generate_fortran_bench(
     if dp_scalars:
         decl_lines.append("      DOUBLE PRECISION " + ", ".join(dp_scalars))
     for arr_name, decl in array_args:
-        sizes = _array_size(decl, assigned_dims)
+        sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
         if sizes:
             dim_str = ", ".join(str(s) for s in sizes)
             decl_lines.append(f"      DOUBLE PRECISION {arr_name}({dim_str})")
@@ -146,7 +190,7 @@ def _generate_fortran_bench(
         if not decl.is_array:
             read_lines.append(f"      READ(99,*) {upper}")
         else:
-            sizes = _array_size(decl, assigned_dims)
+            sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
             if not sizes:
                 continue
             if len(sizes) == 1:
@@ -205,8 +249,17 @@ def _run_fortran_bench(
         exe = keep_dir / fn_stem
         lock = _get_fortran_lock(str(exe))
         with lock:
-            if not exe.exists():
+            # Recompile whenever the generated source has changed (e.g. after
+            # a dimension increase) so the binary always matches the dataset.
+            needs_compile = (
+                not exe.exists()
+                or not bench_f.exists()
+                or bench_f.read_text() != bench_src
+            )
+            if needs_compile:
                 bench_f.write_text(bench_src)
+                if exe.exists():
+                    exe.unlink()
                 cmd = ["gfortran", "-O2", "-ffixed-line-length-none",
                        "-o", str(exe), str(bench_f)]
                 cmd += [str(s) for s in extra_sources]
@@ -281,11 +334,16 @@ def _generate_rust_bench(
 
     The dataset file is read **before** ``Instant::now()`` so that I/O does not
     inflate the benchmark measurement.
+
+    For Fortran assumed-size (``*``) array dimensions, ``max(assigned_dims)``
+    is used as the upper bound so that ``Vec`` allocations are large enough
+    for the actual integer arguments being passed.
     """
     fn_lower = routine_name.lower()
     examples_dir = crate_dir / "examples"
     examples_dir.mkdir(exist_ok=True)
 
+    star_fallback = max(assigned_dims.values(), default=4)
     inputs: List[str] = []
     call_args: List[str] = []
 
@@ -302,9 +360,9 @@ def _generate_rust_bench(
             inputs.append(f"    let {rname}: f64 = _ds.next().unwrap();")
             call_args.append(rname)
         elif decl.is_real and decl.is_array:
-            sizes = _array_size(decl, assigned_dims)
+            sizes = _array_size(decl, assigned_dims, fallback=star_fallback)
             total = 1
-            for s in (sizes or [4]):
+            for s in (sizes or [star_fallback]):
                 total *= s
             inputs.append(
                 f"    let mut {rname}: Vec<f64> = (0..{total}).map(|_| _ds.next().unwrap()).collect();"
@@ -364,7 +422,7 @@ def run_benchmark(
     crate_dir: Optional[Path],
     *,
     routine=None,
-    reps: int = _REPS,
+    reps: int = _BENCH_REPS,
     fortran_ref_dir: Optional[Path] = None,
     datasets_dir: Optional[Path] = None,
 ) -> BenchResult:
@@ -372,6 +430,11 @@ def run_benchmark(
 
     Works for any function: generates all benchmark drivers on the fly from
     the argument declarations parsed from the Fortran source.
+
+    Uses large matrix dimensions (see :data:`_BENCH_DIM_DEFAULTS`) and
+    :data:`_BENCH_REPS` repetitions by default so that each benchmark run
+    takes a meaningful amount of time (typically hundreds of milliseconds for
+    BLAS level-2/3 routines).
     """
     fn = function_name.upper()
     details: List[str] = []
@@ -391,7 +454,7 @@ def run_benchmark(
     else:
         return BenchResult(function_name=fn, error_message="No routine or source path provided.")
 
-    assigned_dims = _assign_dims(arg_decls)
+    assigned_dims = _bench_assign_dims(arg_decls)
 
     # Generate a single dataset (test_index=0) and write it to a shared file
     # that both Fortran and Rust benchmark drivers will read at runtime.
@@ -411,7 +474,9 @@ def run_benchmark(
     datasets_dir.mkdir(parents=True, exist_ok=True)
 
     fn_lower = fn.lower()
-    dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=0)
+    star_fallback = max(assigned_dims.values(), default=4)
+    dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=0,
+                               star_fallback=star_fallback)
     dataset_path = datasets_dir / f"{fn_lower}_bench.txt"
     write_dataset_file(dataset, dataset_path)
 
