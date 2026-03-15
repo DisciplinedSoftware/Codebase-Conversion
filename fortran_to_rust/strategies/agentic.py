@@ -24,7 +24,7 @@ from fortran_to_rust.strategies.hybrid import HybridStrategy
 from fortran_to_rust.strategies.llm_first import _strip_fences
 
 _MAX_QUESTIONS = 3
-_MAX_REPAIR_ROUNDS = 2
+_MAX_REPAIR_ROUNDS = 3
 
 
 class AgenticStrategy(ConversionStrategy):
