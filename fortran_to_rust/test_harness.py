@@ -501,8 +501,33 @@ def _compile_run_fortran(
     driver_src: str,
     extra_sources: List[Path],
     timeout: int = 30,
+    keep_dir: Optional[Path] = None,
+    file_stem: str = "test_driver",
 ) -> Optional[List[float]]:
-    """Compile *driver_src* together with *extra_sources* and return printed floats."""
+    """Compile *driver_src* together with *extra_sources* and return printed floats.
+
+    When *keep_dir* is provided the Fortran source and compiled executable are
+    written there and **not** deleted afterwards, so they can be inspected.
+    Otherwise a temporary directory is used and cleaned up automatically.
+    """
+    if keep_dir is not None:
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        driver_f = keep_dir / f"{file_stem}.f"
+        exe = keep_dir / file_stem
+        driver_f.write_text(driver_src)
+        cmd = ["gfortran", "-O2", "-o", str(exe), str(driver_f)]
+        cmd += [str(s) for s in extra_sources]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None
+        run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+        if run.returncode != 0:
+            return None
+        try:
+            return [float(line.strip()) for line in run.stdout.splitlines() if line.strip()]
+        except ValueError:
+            return None
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         driver_f = tmp / "test_driver.f"
@@ -710,12 +735,18 @@ def run_accuracy_check(
     routine_kind   = getattr(routine, "kind", "subroutine")
     return_ftype   = getattr(routine, "return_type", None) or "DOUBLE PRECISION"
 
+    fortran_keep_dir = (crate_dir / "fortran") if crate_dir else None
+
     for t in range(num_tests):
         driver = generate_fortran_driver(
             fn, arg_names, arg_decls, assigned_dims, test_index=t,
             routine_kind=routine_kind, return_ftype=return_ftype,
         )
-        fortran_out = _compile_run_fortran(driver, extra_sources)
+        fortran_out = _compile_run_fortran(
+            driver, extra_sources,
+            keep_dir=fortran_keep_dir,
+            file_stem=f"test_driver_{t}",
+        )
 
         if fortran_out is None:
             details.append(f"  Test {t+1}: Fortran reference failed to compile/run.")

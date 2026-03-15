@@ -151,7 +151,35 @@ def _generate_fortran_bench(
     )
 
 
-def _run_fortran_bench(bench_src: str, extra_sources: List[Path]) -> Optional[float]:
+def _run_fortran_bench(
+    bench_src: str,
+    extra_sources: List[Path],
+    keep_dir: Optional[Path] = None,
+) -> Optional[float]:
+    """Compile *bench_src* and return measured ms/call.
+
+    When *keep_dir* is provided the Fortran source and compiled executable are
+    written there and **not** deleted afterwards, so they can be inspected.
+    Otherwise a temporary directory is used and cleaned up automatically.
+    """
+    if keep_dir is not None:
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        bench_f = keep_dir / "bench.f"
+        exe = keep_dir / "bench"
+        bench_f.write_text(bench_src)
+        cmd = ["gfortran", "-O2", "-o", str(exe), str(bench_f)]
+        cmd += [str(s) for s in extra_sources]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return None
+        run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+        if run.returncode != 0:
+            return None
+        try:
+            return float(run.stdout.strip())
+        except ValueError:
+            return None
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         bench_f = tmp / "bench.f"
@@ -302,7 +330,8 @@ def run_benchmark(
     if fortran_source_path and fortran_source_path.exists():
         extra = [fortran_source_path] + _find_support_files(fortran_source_path.parent)
         bench_src = _generate_fortran_bench(fn, arg_names, arg_decls, assigned_dims, reps)
-        fortran_ms = _run_fortran_bench(bench_src, extra)
+        fortran_keep_dir = (crate_dir / "fortran") if crate_dir else None
+        fortran_ms = _run_fortran_bench(bench_src, extra, keep_dir=fortran_keep_dir)
         if fortran_ms is not None:
             dim_info = ", ".join(f"{k}={v}" for k, v in sorted(assigned_dims.items()))
             details.append(f"  Fortran (gfortran -O2): {fortran_ms:.3f} ms/call  [{dim_info}]")
