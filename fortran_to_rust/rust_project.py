@@ -77,6 +77,30 @@ def scaffold_crate(
     return crate_dir
 
 
+def get_crate_lib_name(crate_dir: Path) -> str:
+    """Return the lib name declared in *crate_dir*/Cargo.toml.
+
+    Falls back to ``crate_dir.name`` if the file cannot be parsed so callers
+    always get a usable string.  This is used to produce correct
+    ``use <lib_name>::*;`` statements in generated Rust examples.
+    """
+    import re
+
+    cargo_toml = crate_dir / "Cargo.toml"
+    if cargo_toml.exists():
+        content = cargo_toml.read_text()
+        # Prefer the explicit [lib] name; fall back to [package] name.
+        for section in (r"\[lib\]", r"\[package\]"):
+            m = re.search(
+                section + r"[^\[]*\bname\s*=\s*\"([^\"]+)\"",
+                content,
+                re.DOTALL,
+            )
+            if m:
+                return m.group(1)
+    return crate_dir.name
+
+
 def quick_check(rust_source: str, work_dir: Path) -> Tuple[bool, str]:
     """Compile *rust_source* in a throw-away crate and return (ok, output).
 

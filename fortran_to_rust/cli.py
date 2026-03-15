@@ -66,6 +66,11 @@ _STRATEGY_DESCRIPTIONS = {
         "  Deterministic f2c skeleton first, then optional LLM polishing pass.  "
         "Works fully offline; LLM polish is applied if a key is available."
     ),
+    "all": (
+        "[bold]All strategies in parallel[/bold]\n"
+        "  Run strategies 1, 2, and 3 simultaneously, each in its own output "
+        "folder, then display a side-by-side comparison report."
+    ),
 }
 
 
@@ -77,14 +82,6 @@ def run(output_dir: Path) -> None:
     """Launch the interactive conversion wizard."""
     _print_banner()
     console.print(Rule(style="cyan"))
-
-    # Create a timestamped snapshot directory for this run's artifacts.
-    # BLAS sources are fetched/cached at output_dir; everything generated
-    # (Rust crate, reports) lands in run_dir so each run is self-contained.
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = output_dir / f"report_{ts}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    console.print(f"  [dim]Run output: {run_dir}[/dim]")
 
     # --- 1. Library selection -----------------------------------------------
     library = _ask_library()
@@ -104,6 +101,21 @@ def run(output_dir: Path) -> None:
 
     # --- 4. LLM configuration (if needed) -------------------------------------
     llm = _configure_llm(strategy_key)
+
+    # --- 4b. Parallel comparison mode ----------------------------------------
+    # Handled before creating run_dir so no empty report_<date> folder is left
+    # behind when the user picks "all".
+    if strategy_key == "all":
+        _run_all_parallel_interactive(output_dir, functions_to_convert, source_map)
+        return
+
+    # Create the timestamped snapshot directory only for single-strategy runs.
+    # BLAS sources are fetched/cached at output_dir; everything generated
+    # (Rust crate, reports) lands in run_dir so each run is self-contained.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"report_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"  [dim]Run output: {run_dir}[/dim]")
 
     # --- 5. Call graph --------------------------------------------------------
     console.print()
@@ -184,7 +196,7 @@ def run(output_dir: Path) -> None:
         src_path = source_map.get(fn_name.lower())
         routine = routine_map.get(fn_name.upper())
         acc = run_accuracy_check(
-            fn_name, src_path, crate_dir if build_ok else None, routine=routine
+            fn_name, src_path, crate_dir, routine=routine
         )
         accuracy_results.append(acc)
         _show_accuracy(acc)
@@ -196,7 +208,7 @@ def run(output_dir: Path) -> None:
     for fn_name in functions_to_convert:
         src_path = source_map.get(fn_name.lower())
         routine = routine_map.get(fn_name.upper())
-        br = run_benchmark(fn_name, src_path, crate_dir if build_ok else None, routine=routine)
+        br = run_benchmark(fn_name, src_path, crate_dir, routine=routine)
         bench_results.append(br)
         console.print(f"  {br.summary}")
         for d in br.details:
@@ -226,6 +238,74 @@ def run(output_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Wizard helpers
 # ---------------------------------------------------------------------------
+
+def _run_all_parallel_interactive(
+    output_dir: Path,
+    functions_to_convert: List[str],
+    source_map: Dict[str, Path],
+) -> None:
+    """Run all three strategies in parallel using pre-fetched source data."""
+    from fortran_to_rust.compare import (
+        print_comparison_table,
+        run_all_parallel,
+    )
+    from fortran_to_rust.parser import parse_file
+
+    console.print()
+    console.print(Panel("[bold]Running all 3 strategies in parallel…[/bold]", style="cyan"))
+
+    # Single run directory — same naming convention as single-strategy runs.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"report_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"  [dim]Run directory: {run_dir}[/dim]")
+
+    # Parse sources (needed by workers; source_map already has them).
+    all_routines = []
+    for path in source_map.values():
+        all_routines.extend(parse_file(path))
+    routine_map = {r.name.upper(): r for r in all_routines}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+        refresh_per_second=4,
+    ) as progress:
+        tasks = {
+            key: progress.add_task(
+                f"  [cyan]Strategy {key}[/cyan] ({STRATEGY_NAMES[key]}): Starting…"
+            )
+            for key in ("1", "2", "3")
+        }
+
+        def _make_update(key: str):
+            def _update(msg: str) -> None:
+                progress.update(
+                    tasks[key],
+                    description=(
+                        f"  [cyan]Strategy {key}[/cyan] ({STRATEGY_NAMES[key]}): {msg}"
+                    ),
+                )
+            return _update
+
+        all_results, md_path, html_path = run_all_parallel(
+            output_dir=output_dir,
+            run_dir=run_dir,
+            functions_to_convert=functions_to_convert,
+            source_map=source_map,
+            routine_map=routine_map,
+            library="BLAS",
+            progress_update=lambda key, msg: _make_update(key)(msg),
+        )
+
+    console.print(Rule("[bold cyan]Comparison Summary[/bold cyan]", style="cyan"))
+    print_comparison_table(console, all_results)
+    console.print(f"\n  [green]Markdown:[/green]  {md_path}")
+    console.print(f"  [green]HTML:[/green]      {html_path}")
+    console.print(Rule(style="cyan"))
+
 
 def _ask_library() -> str:
     console.print("\n[bold]Which library would you like to convert?[/bold]")
@@ -332,7 +412,9 @@ def _ask_strategy() -> str:
     for key, desc in _STRATEGY_DESCRIPTIONS.items():
         console.print(f"  [cyan]{key}[/cyan]  {desc}\n")
     return Prompt.ask(
-        "[bold cyan]>[/bold cyan] Strategy", choices=["1", "2", "3"], default="3"
+        "[bold cyan]>[/bold cyan] Strategy",
+        choices=["1", "2", "3", "all"],
+        default="3",
     )
 
 
@@ -353,9 +435,12 @@ def _configure_llm(strategy_key: str) -> LLMClient:
         return configured
 
     # Still no auth after setup (user skipped or setup failed)
-    if strategy_key in ("1", "2"):
+    if strategy_key in ("1", "2", "all"):
         console.print(
             "\n  [yellow]⚠[/yellow] No LLM available — "
+            "strategies 1 and 2 will fall back to rule-based conversion."
+            if strategy_key == "all"
+            else "\n  [yellow]⚠[/yellow] No LLM available — "
             "switching to Strategy 3 (Hybrid rule-based only)."
         )
     else:
