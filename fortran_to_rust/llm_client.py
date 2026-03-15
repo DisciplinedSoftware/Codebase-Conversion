@@ -280,11 +280,11 @@ class LLMClient:
         # Load .env before reading any env vars
         _load_dotenv()
 
-        # Default to "copilot" — exchanges the GitHub token for a Copilot API
-        # bearer so Copilot subscribers use their paid quota.  Falls back to
-        # github_models (raw bearer, free tier) if the exchange fails.
-        # Override with LLM_PROVIDER=github_models in .env to skip the exchange.
-        self.provider = (provider or os.environ.get("LLM_PROVIDER", "copilot")).lower()
+        # Default to "github_models" — the deprecated github.copilot VS Code
+        # extension no longer writes ~/.config/github-copilot/hosts.json, so
+        # the Copilot token exchange no longer works in most environments.
+        # Override with LLM_PROVIDER=copilot in .env to attempt the exchange.
+        self.provider = (provider or os.environ.get("LLM_PROVIDER", "github_models")).lower()
 
         self.api_key = api_key or _resolve_api_key(self.provider)
         self.model = model or os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
@@ -382,9 +382,12 @@ class LLMClient:
         rate_limit_hits = 0
         for attempt in range(retry + 1):
             try:
+                # Evaluate headers first — _headers() may update self.base_url
+                # (e.g. copilot → github_models fallback).
+                hdrs = self._headers()
                 resp = requests.post(
                     self.base_url,
-                    headers=self._headers(),
+                    headers=hdrs,
                     json=payload,
                     timeout=_REQUEST_TIMEOUT,
                     stream=streaming,
