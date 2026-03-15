@@ -33,7 +33,7 @@ from fortran_to_rust.fetcher import (
 from fortran_to_rust.llm_client import LLMClient, LLMUnavailableError
 from fortran_to_rust.parser import parse_file
 from fortran_to_rust.reporter import generate_report
-from fortran_to_rust.rust_project import build_crate, scaffold_crate, test_crate
+from fortran_to_rust.rust_project import build_crate, repair_crate_with_llm, scaffold_crate, test_crate
 from fortran_to_rust.strategies import STRATEGY_MAP, STRATEGY_NAMES
 from fortran_to_rust.test_harness import run_accuracy_check
 
@@ -184,6 +184,31 @@ def run(output_dir: Path) -> None:
 
     build_ok, build_out = _run_with_spinner("cargo build --release", build_crate, crate_dir)
     _show_build_result("cargo build --release", build_ok, build_out)
+
+    if not build_ok and llm and llm.is_available and "cargo not found" not in build_out:
+        console.print(
+            "  [yellow]⚙  Build failed — starting LLM repair loop…[/yellow]"
+        )
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("  [dim]LLM repair in progress…[/dim]")
+
+            def _repair_cb(msg: str) -> None:
+                progress.update(task, description=f"  [dim]{msg}[/dim]")
+                console.print(msg)
+
+            build_ok, build_out, rust_sources = repair_crate_with_llm(
+                crate_dir,
+                rust_sources,
+                llm,
+                progress_callback=_repair_cb,
+            )
+        _show_build_result("cargo build --release (after LLM repair)", build_ok, build_out)
 
     test_ok, test_out = _run_with_spinner("cargo test", test_crate, crate_dir)
     _show_build_result("cargo test", test_ok, test_out)

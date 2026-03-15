@@ -9,12 +9,16 @@ Provides helpers to:
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from fortran_to_rust.llm_client import LLMClient
 
 _CARGO_TOML_TEMPLATE = """\
 [package]
@@ -42,6 +46,8 @@ _LIB_RS_HEADER = """\
 
 #![allow(clippy::all, non_snake_case, unused_variables, dead_code)]
 """
+
+_MAX_CRATE_REPAIR_ROUNDS = 3
 
 
 def scaffold_crate(
@@ -193,6 +199,156 @@ def clippy_crate(crate_dir: Path) -> Tuple[bool, str]:
     except FileNotFoundError:
         return False, "cargo not found: install Rust from https://rustup.rs"
     return result.returncode == 0, (result.stdout + result.stderr).strip()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for crate-level LLM repair
+# ---------------------------------------------------------------------------
+
+def _strip_fences(text: str) -> str:
+    """Remove markdown code fences that the LLM sometimes adds."""
+    text = re.sub(r"^```(?:rust)?\s*\n?", "", text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"\n?```\s*$", "", text.strip(), flags=re.MULTILINE)
+    return text.strip()
+
+
+def _ensure_top_level_pub_fn(source: str, fn_name: str) -> str:
+    """Ensure *fn_name* is declared ``pub`` at the top level.
+
+    Handles two common LLM mistakes:
+    1. Function is defined without ``pub`` → adds ``pub``.
+    2. Function is already ``pub`` → no-op.
+    """
+    if re.search(
+        rf"^pub\s+(?:unsafe\s+)?fn\s+{re.escape(fn_name)}\b", source, re.MULTILINE
+    ):
+        return source
+    fixed, n = re.subn(
+        rf"^fn\s+{re.escape(fn_name)}\b",
+        f"pub fn {fn_name}",
+        source,
+        flags=re.MULTILINE,
+    )
+    return fixed if n > 0 else source
+
+
+def _find_failing_modules(build_output: str) -> List[str]:
+    """Parse cargo build output and return module names that have compile errors.
+
+    Looks for lines containing ``src/<name>.rs:`` in the cargo diagnostic
+    output (both the default and the ``--message-format=short`` styles).
+    ``lib`` is excluded because it is auto-generated and not directly fixable
+    by the per-function LLM repair loop.
+    """
+    seen: set = set()
+    mods: List[str] = []
+    for line in build_output.splitlines():
+        m = re.search(r"src/(\w+)\.rs:", line)
+        if m:
+            mod = m.group(1)
+            if mod != "lib" and mod not in seen:
+                seen.add(mod)
+                mods.append(mod)
+    return mods
+
+
+def _extract_module_errors(build_output: str, mod_name: str) -> str:
+    """Extract error blocks that reference ``src/{mod_name}.rs``.
+
+    Splits the output on blank lines to isolate diagnostic blocks, keeps
+    those that mention the target file, and joins them back.  Falls back to
+    the full output when no file-specific blocks are found.
+    """
+    blocks: List[str] = []
+    current: List[str] = []
+    for line in build_output.splitlines():
+        if line.strip() == "":
+            if current:
+                block = "\n".join(current)
+                if f"src/{mod_name}.rs" in block:
+                    blocks.append(block)
+                current = []
+        else:
+            current.append(line)
+    if current:
+        block = "\n".join(current)
+        if f"src/{mod_name}.rs" in block:
+            blocks.append(block)
+    return "\n\n".join(blocks) if blocks else build_output
+
+
+def repair_crate_with_llm(
+    crate_dir: Path,
+    rust_sources: Dict[str, str],
+    llm: "LLMClient",
+    progress_callback: Optional[Callable[[str], None]] = None,
+    max_rounds: int = _MAX_CRATE_REPAIR_ROUNDS,
+) -> Tuple[bool, str, Dict[str, str]]:
+    """Attempt to fix a failing crate build with iterative LLM repair.
+
+    For each repair round:
+    1. Run ``cargo build --release``.
+    2. Parse the output to identify which module files have errors.
+    3. Call ``llm.repair_rust()`` for each failing module.
+    4. Write the repaired sources back to disk.
+
+    Repeats until the build passes or *max_rounds* is exhausted.
+
+    Returns ``(build_ok, final_build_output, updated_rust_sources)``.
+    The returned *updated_rust_sources* dict contains repaired source code
+    for any modules that were modified, so callers can persist the fixes.
+    """
+    cb = progress_callback or (lambda msg: None)
+    sources = dict(rust_sources)  # mutable copy
+    src_dir = crate_dir / "src"
+
+    if not shutil.which("cargo"):
+        cb("  [yellow]cargo not found — skipping LLM repair loop.[/yellow]")
+        return False, "cargo not found: install Rust from https://rustup.rs", sources
+
+    for round_num in range(1, max_rounds + 1):
+        ok, build_out = build_crate(crate_dir)
+        if ok:
+            return True, build_out, sources
+
+        failing = _find_failing_modules(build_out)
+        if not failing:
+            cb(
+                f"  [yellow]LLM repair round {round_num}: "
+                "cannot identify failing modules in build output — stopping.[/yellow]"
+            )
+            return False, build_out, sources
+
+        cb(
+            f"  [yellow]Build failed (LLM repair round {round_num}/{max_rounds}) — "
+            f"repairing {len(failing)} module(s): {', '.join(failing)}[/yellow]"
+        )
+
+        for mod_name in failing:
+            mod_file = src_dir / f"{mod_name}.rs"
+            current_source = sources.get(mod_name)
+            if current_source is None:
+                if mod_file.exists():
+                    current_source = mod_file.read_text()
+                else:
+                    cb(f"    [dim]Skipping {mod_name}: source file not found.[/dim]")
+                    continue
+
+            module_errors = _extract_module_errors(build_out, mod_name)
+            cb(f"    Repairing [bold cyan]{mod_name}[/bold cyan]…")
+            try:
+                repaired = _strip_fences(
+                    llm.repair_rust(current_source, module_errors, mod_name)
+                )
+                repaired = _ensure_top_level_pub_fn(repaired, mod_name.lower())
+                sources[mod_name] = repaired
+                mod_file.write_text(repaired)
+            except Exception as exc:
+                cb(f"    [red]LLM repair failed for {mod_name}: {exc}[/red]")
+
+    # Final build after all repair rounds are exhausted
+    ok, build_out = build_crate(crate_dir)
+    return ok, build_out, sources
 
 
 def add_rust_tests(
