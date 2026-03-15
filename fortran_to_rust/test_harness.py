@@ -654,7 +654,8 @@ def _compile_run_fortran(
         with lock:
             if not exe.exists():
                 driver_f.write_text(driver_src)
-                cmd = ["gfortran", "-O2", "-o", str(exe), str(driver_f)]
+                cmd = ["gfortran", "-O2", "-ffixed-line-length-none",
+                       "-o", str(exe), str(driver_f)]
                 cmd += [str(s) for s in extra_sources]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
                 if result.returncode != 0:
@@ -672,7 +673,8 @@ def _compile_run_fortran(
         driver_f = tmp / "test_driver.f"
         driver_f.write_text(driver_src)
         exe = tmp / "test_driver"
-        cmd = ["gfortran", "-O2", "-o", str(exe), str(driver_f)]
+        cmd = ["gfortran", "-O2", "-ffixed-line-length-none",
+               "-o", str(exe), str(driver_f)]
         cmd += [str(s) for s in extra_sources]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:

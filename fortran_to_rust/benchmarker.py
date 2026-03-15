@@ -207,7 +207,8 @@ def _run_fortran_bench(
         with lock:
             if not exe.exists():
                 bench_f.write_text(bench_src)
-                cmd = ["gfortran", "-O2", "-o", str(exe), str(bench_f)]
+                cmd = ["gfortran", "-O2", "-ffixed-line-length-none",
+                       "-o", str(exe), str(bench_f)]
                 cmd += [str(s) for s in extra_sources]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if result.returncode != 0:
@@ -225,7 +226,8 @@ def _run_fortran_bench(
         bench_f = tmp / "bench.f"
         bench_f.write_text(bench_src)
         exe = tmp / "bench"
-        cmd = ["gfortran", "-O2", "-o", str(exe), str(bench_f)]
+        cmd = ["gfortran", "-O2", "-ffixed-line-length-none",
+               "-o", str(exe), str(bench_f)]
         cmd += [str(s) for s in extra_sources]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
