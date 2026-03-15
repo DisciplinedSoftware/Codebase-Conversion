@@ -100,7 +100,7 @@ class LLMFirstStrategy(ConversionStrategy):
         # Accuracy repair loop — the LLM must produce a working conversion
         # before returning. If accuracy still fails after all retries, the
         # function is marked as failed and the pipeline will not process it further.
-        _, _, acc_passed = self._fallback._accuracy_repair_loop(
+        rust_source, _, acc_passed = self._fallback._accuracy_repair_loop(
             rust_source, routine, f"LLM-First ({self.llm.provider}/{self.llm.model})", cb
         )
         if acc_passed is False:

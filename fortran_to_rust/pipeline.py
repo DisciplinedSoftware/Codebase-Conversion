@@ -313,6 +313,45 @@ def run_post_conversion_loop(
                     f"{'✅ passed' if build_ok else '⚠ finished with errors'}"
                 )
 
+                # After build repair changes code, immediately validate accuracy and
+                # apply LLM correction for any failures before moving to the next step.
+                if build_ok:
+                    _log("  [yellow]⚙  Validating accuracy after build repair…[/yellow]")
+                    inline_acc = [
+                        run_accuracy_check(
+                            fn, source_map.get(fn), crate_dir,
+                            routine=routine_map.get(fn.upper()),
+                            fortran_ref_dir=fortran_ref_dir,
+                            datasets_dir=datasets_dir,
+                        )
+                        for fn in functions_to_convert
+                        if fn not in exhausted_fns
+                    ]
+                    inline_failed = [acc.function_name.lower() for acc in inline_acc if not acc.passed]
+                    if inline_failed:
+                        _log(
+                            f"  [yellow]⚙  Accuracy failed after build repair for: "
+                            f"{', '.join(inline_failed)} — applying LLM correction…[/yellow]"
+                        )
+                        inline_acc_map = {acc.function_name.lower(): acc for acc in inline_acc}
+                        sources, conv_results = _repair_functions(
+                            failing_fns=inline_failed,
+                            rust_sources=sources,
+                            conversion_results=conv_results,
+                            source_map=source_map,
+                            routine_map=routine_map,
+                            accuracy_map=inline_acc_map,
+                            llm=llm,
+                            log=_log,
+                        )
+                        # Re-scaffold and re-build with the accuracy-corrected sources
+                        crate_dir = scaffold_crate(run_dir, crate_name, sources)
+                        build_ok, build_out = build_crate(crate_dir)
+                        _log(
+                            f"  cargo build (after accuracy correction): "
+                            f"{'✅ passed' if build_ok else '⚠ finished with errors'}"
+                        )
+
         # ── Step: Test ────────────────────────────────────────────────────────
         test_ok, _test_out = test_crate(crate_dir)
         if not is_retry:
