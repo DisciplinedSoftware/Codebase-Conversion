@@ -65,12 +65,16 @@ def scaffold_crate(
         _CARGO_TOML_TEMPLATE.format(crate_name=crate_name)
     )
 
-    # src/lib.rs — concatenate all converted routines
+    # src/lib.rs — one module per function, deduplicating on the lowercased name
+    # so that mixed-case keys (e.g. both "DGEMM" and "dgemm") never produce
+    # duplicate `pub mod` / `pub use` lines.
     lib_parts = [_LIB_RS_HEADER]
-    mod_names: List[str] = []
+    seen_mods: set = set()
     for fn_name, src in rust_sources.items():
         mod_name = fn_name.lower()
-        mod_names.append(mod_name)
+        if mod_name in seen_mods:
+            continue
+        seen_mods.add(mod_name)
         mod_file = src_dir / f"{mod_name}.rs"
         mod_file.write_text(src)
         lib_parts.append(f"pub mod {mod_name};")
@@ -326,7 +330,17 @@ def repair_crate_with_llm(
 
         for mod_name in failing:
             mod_file = src_dir / f"{mod_name}.rs"
-            current_source = sources.get(mod_name)
+            # Look up the source using the lowercase key, but also check the
+            # original-case key so that case-mismatches don't create a second
+            # entry in the sources dict (which would produce duplicate pub mod
+            # lines in lib.rs when the crate is re-scaffolded).
+            canonical_key = mod_name
+            if mod_name not in sources:
+                for k in sources:
+                    if k.lower() == mod_name:
+                        canonical_key = k
+                        break
+            current_source = sources.get(canonical_key)
             if current_source is None:
                 if mod_file.exists():
                     current_source = mod_file.read_text()
@@ -341,7 +355,7 @@ def repair_crate_with_llm(
                     llm.repair_rust(current_source, module_errors, mod_name)
                 )
                 repaired = _ensure_top_level_pub_fn(repaired, mod_name.lower())
-                sources[mod_name] = repaired
+                sources[canonical_key] = repaired
                 mod_file.write_text(repaired)
             except Exception as exc:
                 cb(f"    [red]LLM repair failed for {mod_name}: {exc}[/red]")
