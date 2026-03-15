@@ -32,14 +32,17 @@ def run_strategy_worker(
     that the Fortran compilation step is performed only once across all
     strategies running in parallel.
 
+    The scaffold → build → accuracy → benchmark portion is handled by
+    :func:`~fortran_to_rust.pipeline.run_post_conversion_loop` so that any
+    function whose accuracy check fails or whose Rust benchmark cannot run is
+    automatically re-converted and re-checked.
+
     Returns a result dict with all artifacts and metrics, or a dict with an
     ``"error"`` key if an unrecoverable failure occurs.
     """
-    from fortran_to_rust.benchmarker import run_benchmark
     from fortran_to_rust.llm_client import LLMClient
-    from fortran_to_rust.rust_project import build_crate, scaffold_crate, test_crate
+    from fortran_to_rust.pipeline import run_post_conversion_loop
     from fortran_to_rust.strategies import STRATEGY_MAP, STRATEGY_NAMES
-    from fortran_to_rust.test_harness import run_accuracy_check
 
     def step(msg: str) -> None:
         if step_callback:
@@ -59,61 +62,39 @@ def run_strategy_worker(
             result = strategy_obj.convert(routine)
             conversion_results.append(result)
 
-        step("Scaffolding crate…")
         rust_sources = {
             r.routine_name: r.rust_source
             for r in conversion_results
             if r.rust_source
         }
-        crate_dir = scaffold_crate(run_dir, "blas_converted", rust_sources)
 
-        step("cargo build…")
-        build_ok, _build_out = build_crate(crate_dir)
-
-        step("cargo test…")
-        test_ok, _test_out = test_crate(crate_dir)
-
-        step("Accuracy checks…")
-        accuracy_results = []
-        for fn in functions_to_convert:
-            src_path = source_map.get(fn)
-            routine = routine_map.get(fn.upper())
-            acc = run_accuracy_check(
-                fn,
-                src_path,
-                crate_dir,
-                routine=routine,
-                fortran_ref_dir=fortran_ref_dir,
-                datasets_dir=datasets_dir,
-            )
-            accuracy_results.append(acc)
-
-        step("Benchmarking…")
-        bench_results = []
-        for fn in functions_to_convert:
-            src_path = source_map.get(fn)
-            routine = routine_map.get(fn.upper())
-            bench = run_benchmark(
-                fn,
-                src_path,
-                crate_dir,
-                routine=routine,
-                fortran_ref_dir=fortran_ref_dir,
-                datasets_dir=datasets_dir,
-            )
-            bench_results.append(bench)
+        step("Building, checking accuracy and benchmarking…")
+        state = run_post_conversion_loop(
+            run_dir=run_dir,
+            crate_name="blas_converted",
+            functions_to_convert=functions_to_convert,
+            rust_sources=rust_sources,
+            conversion_results=conversion_results,
+            source_map=source_map,
+            routine_map=routine_map,
+            llm=llm,
+            strategy=strategy_obj,
+            fortran_ref_dir=fortran_ref_dir,
+            datasets_dir=datasets_dir,
+            log=step,
+        )
 
         step("Done ✓")
         return {
             "strategy_key": strategy_key,
             "strategy_name": STRATEGY_NAMES[strategy_key],
             "run_dir": run_dir,
-            "crate_dir": crate_dir,
-            "conversion_results": conversion_results,
-            "accuracy_results": accuracy_results,
-            "bench_results": bench_results,
-            "build_ok": build_ok,
-            "test_ok": test_ok,
+            "crate_dir": state.crate_dir,
+            "conversion_results": state.conversion_results,
+            "accuracy_results": state.accuracy_results,
+            "bench_results": state.bench_results,
+            "build_ok": state.build_ok,
+            "test_ok": state.test_ok,
             "error": None,
         }
 

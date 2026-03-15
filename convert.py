@@ -197,15 +197,13 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     from rich.rule import Rule
     from rich.table import Table
 
-    from fortran_to_rust.benchmarker import run_benchmark
     from fortran_to_rust.call_graph import build_call_graph, render_graph
     from fortran_to_rust.fetcher import BLAS_FUNCTIONS, fetch_blas
     from fortran_to_rust.llm_client import LLMClient
     from fortran_to_rust.parser import parse_file
+    from fortran_to_rust.pipeline import run_post_conversion_loop
     from fortran_to_rust.reporter import generate_report
-    from fortran_to_rust.rust_project import build_crate, repair_crate_with_llm, scaffold_crate, test_crate
     from fortran_to_rust.strategies import STRATEGY_MAP, STRATEGY_NAMES
-    from fortran_to_rust.test_harness import run_accuracy_check
 
     console = Console()
     console.print(Rule("[bold cyan]Fortran-to-Rust  (non-interactive)[/bold cyan]"))
@@ -290,7 +288,7 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
         status = "[green]✓[/green]" if result.success else "[red]✗[/red]"
         console.print(f"  {status} {fn} — {result.strategy_used}")
 
-    # --- 5. Scaffold crate ---
+    # --- 5. Scaffold / build / accuracy / benchmark (with retry loop) ---
     console.print("\n[bold]Scaffolding Rust crate…[/bold]")
     rust_sources = {
         r.routine_name: r.rust_source
@@ -298,67 +296,31 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
         if r.rust_source
     }
     crate_name = "blas_converted"
-    crate_dir = scaffold_crate(run_dir, crate_name, rust_sources)
-    console.print(f"  Crate: {crate_dir}")
 
-    build_ok, build_out = _run_with_spinner("cargo build --release", console, build_crate, crate_dir)
-    console.print(f"  cargo build: {'✅ passed' if build_ok else '⚠ finished with errors'}")
-
-    if not build_ok and llm.is_available and "cargo not found" not in build_out:
-        console.print("  [yellow]⚙  Build failed — starting LLM repair loop…[/yellow]")
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            TimeElapsedColumn(),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("  [dim]LLM repair in progress…[/dim]")
-
-            def _repair_cb(msg: str) -> None:
-                progress.update(task, description=f"  [dim]{msg}[/dim]")
-                console.print(msg)
-
-            build_ok, build_out, rust_sources = repair_crate_with_llm(
-                crate_dir,
-                rust_sources,
-                llm,
-                progress_callback=_repair_cb,
-            )
-        console.print(f"  cargo build (after LLM repair): {'✅ passed' if build_ok else '⚠ finished with errors'}")
-
-    test_ok, test_out = _run_with_spinner("cargo test", console, test_crate, crate_dir)
-    console.print(f"  cargo test:  {'✅ passed' if test_ok else '⚠ finished with errors'}")
-
-    # --- 6. Accuracy ---
-    console.print("\n[bold]Accuracy checks…[/bold]")
-    accuracy_results = []
-    for fn in functions_to_convert:
-        src_path = source_map.get(fn)
-        routine = routine_map.get(fn.upper())
-        acc = run_accuracy_check(
-            fn, src_path, crate_dir if build_ok else None, routine=routine
+    console.print("\n[bold]Building, checking accuracy and benchmarking…[/bold]")
+    pipeline_state = run_post_conversion_loop(
+        run_dir=run_dir,
+        crate_name=crate_name,
+        functions_to_convert=functions_to_convert,
+        rust_sources=rust_sources,
+        conversion_results=conversion_results,
+        source_map=source_map,
+        routine_map=routine_map,
+        llm=llm,
+        strategy=strategy,
+        log=console.print,
+    )
+    crate_dir = pipeline_state.crate_dir
+    build_ok = pipeline_state.build_ok
+    test_ok = pipeline_state.test_ok
+    accuracy_results = pipeline_state.accuracy_results
+    bench_results = pipeline_state.bench_results
+    rust_sources = pipeline_state.rust_sources
+    conversion_results = pipeline_state.conversion_results
+    if pipeline_state.retry_count:
+        console.print(
+            f"  [dim]Pipeline retried {pipeline_state.retry_count} time(s).[/dim]"
         )
-        accuracy_results.append(acc)
-        status = "✅" if acc.passed else "⚠"
-        err_str = f"  max_err={acc.max_abs_error:.2e}" if acc.max_abs_error else ""
-        console.print(f"  {status} {fn}{err_str}")
-        for d in acc.details:
-            console.print(f"  {d}")
-
-    # --- 7. Benchmark ---
-    console.print("\n[bold]Benchmarks…[/bold]")
-    bench_results = []
-    for fn in functions_to_convert:
-        src_path = source_map.get(fn)
-        routine = routine_map.get(fn.upper())
-        bench = run_benchmark(
-            fn, src_path, crate_dir if build_ok else None, routine=routine
-        )
-        bench_results.append(bench)
-        console.print(f"  {fn}: {bench.summary}")
-        for d in bench.details:
-            console.print(f"  {d}")
 
     # --- 8. Report ---
     console.print("\n[bold]Generating report…[/bold]")

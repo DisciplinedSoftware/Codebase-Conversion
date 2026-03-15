@@ -24,7 +24,6 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich import print as rprint
 
-from fortran_to_rust.benchmarker import run_benchmark
 from fortran_to_rust.call_graph import build_call_graph, render_graph
 from fortran_to_rust.fetcher import (
     BLAS_FUNCTIONS,
@@ -32,10 +31,9 @@ from fortran_to_rust.fetcher import (
 )
 from fortran_to_rust.llm_client import LLMClient, LLMUnavailableError
 from fortran_to_rust.parser import parse_file
+from fortran_to_rust.pipeline import run_post_conversion_loop
 from fortran_to_rust.reporter import generate_report
-from fortran_to_rust.rust_project import build_crate, repair_crate_with_llm, scaffold_crate, test_crate
 from fortran_to_rust.strategies import STRATEGY_MAP, STRATEGY_NAMES
-from fortran_to_rust.test_harness import run_accuracy_check
 
 console = Console()
 
@@ -170,78 +168,42 @@ def run(output_dir: Path) -> None:
         else:
             console.print(f"  [red]✗[/red] {fn_name} conversion failed: {result.error}")
 
-    # --- 7. Package into Cargo crate ------------------------------------------
+    # --- 7. Package, build, accuracy and benchmark (with retry loop) ----------
     console.print()
-    console.print(Panel("[bold]Step 5 — Packaging Rust crate[/bold]", style="cyan"))
+    console.print(Panel("[bold]Step 5 — Packaging, building, accuracy & benchmark[/bold]", style="cyan"))
     rust_sources: Dict[str, str] = {
         r.routine_name: r.rust_source
         for r in conversion_results
         if r.rust_source
     }
     crate_name = f"{library.lower()}_converted"
-    crate_dir = scaffold_crate(run_dir, crate_name, rust_sources)
-    console.print(f"  [green]✓[/green] Crate created at {crate_dir}")
 
-    build_ok, build_out = _run_with_spinner("cargo build --release", build_crate, crate_dir)
-    _show_build_result("cargo build --release", build_ok, build_out)
-
-    if not build_ok and llm and llm.is_available and "cargo not found" not in build_out:
+    pipeline_state = run_post_conversion_loop(
+        run_dir=run_dir,
+        crate_name=crate_name,
+        functions_to_convert=functions_to_convert,
+        rust_sources=rust_sources,
+        conversion_results=conversion_results,
+        source_map=source_map,
+        routine_map=routine_map,
+        llm=llm,
+        strategy=strategy,
+        datasets_dir=run_dir / "datasets",
+        log=console.print,
+    )
+    crate_dir = pipeline_state.crate_dir
+    build_ok = pipeline_state.build_ok
+    test_ok = pipeline_state.test_ok
+    accuracy_results = pipeline_state.accuracy_results
+    bench_results = pipeline_state.bench_results
+    rust_sources = pipeline_state.rust_sources
+    conversion_results = pipeline_state.conversion_results
+    if pipeline_state.retry_count:
         console.print(
-            "  [yellow]⚙  Build failed — starting LLM repair loop…[/yellow]"
+            f"  [dim]Pipeline retried {pipeline_state.retry_count} time(s).[/dim]"
         )
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            TimeElapsedColumn(),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("  [dim]LLM repair in progress…[/dim]")
 
-            def _repair_cb(msg: str) -> None:
-                progress.update(task, description=f"  [dim]{msg}[/dim]")
-                console.print(msg)
-
-            build_ok, build_out, rust_sources = repair_crate_with_llm(
-                crate_dir,
-                rust_sources,
-                llm,
-                progress_callback=_repair_cb,
-            )
-        _show_build_result("cargo build --release (after LLM repair)", build_ok, build_out)
-
-    test_ok, test_out = _run_with_spinner("cargo test", test_crate, crate_dir)
-    _show_build_result("cargo test", test_ok, test_out)
-
-    # --- 8. Accuracy -----------------------------------------------------------
-    console.print()
-    console.print(Panel("[bold]Step 6 — Numerical accuracy check[/bold]", style="cyan"))
-    accuracy_results = []
-    for fn_name in functions_to_convert:
-        src_path = source_map.get(fn_name.lower())
-        routine = routine_map.get(fn_name.upper())
-        acc = run_accuracy_check(
-            fn_name, src_path, crate_dir, routine=routine,
-            datasets_dir=run_dir / "datasets",
-        )
-        accuracy_results.append(acc)
-        _show_accuracy(acc)
-
-    # --- 9. Benchmark ----------------------------------------------------------
-    console.print()
-    console.print(Panel("[bold]Step 7 — Performance benchmark[/bold]", style="cyan"))
-    bench_results = []
-    for fn_name in functions_to_convert:
-        src_path = source_map.get(fn_name.lower())
-        routine = routine_map.get(fn_name.upper())
-        br = run_benchmark(fn_name, src_path, crate_dir, routine=routine,
-                           datasets_dir=run_dir / "datasets")
-        bench_results.append(br)
-        console.print(f"  {br.summary}")
-        for d in br.details:
-            console.print(d)
-
-    # --- 10. Report -----------------------------------------------------------
+    # --- 8. Report -----------------------------------------------------------
     console.print()
     console.print(Panel("[bold]Step 8 — Generating report[/bold]", style="cyan"))
     report_path = generate_report(
@@ -258,7 +220,7 @@ def run(output_dir: Path) -> None:
     md_path, html_path = report_path
     console.print(f"  [green]✓[/green] Report written to [bold]{html_path}[/bold]")
 
-    # --- 11. Final summary ----------------------------------------------------
+    # --- 9. Final summary -----------------------------------------------------
     _print_final_summary(conversion_results, accuracy_results, bench_results, html_path)
 
 
