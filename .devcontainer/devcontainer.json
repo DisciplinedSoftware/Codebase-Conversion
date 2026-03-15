@@ -13,12 +13,13 @@
     "source=codebase-conversion-cargo-git,target=/home/vscode/.cargo/git,type=volume"
   ],
   // After the container is created:
-  //   1. Upgrade pip and install the Python package in editable mode.
+  //   1. Upgrade pip.
   //   2. Run the interactive auth-setup script so the user can choose between
   //      `gh auth login` and a .env file for LLM API access.
-  "postCreateCommand": "/home/vscode/.venv/bin/pip install --upgrade pip && /home/vscode/.venv/bin/pip install --no-cache-dir -e . 2>/dev/null || true && bash scripts/setup_auth.sh",
+  //   3. Install the Python package in editable mode (venv already active).
+  "postCreateCommand": "/home/vscode/.venv/bin/pip install --upgrade pip && bash scripts/setup_auth.sh && /home/vscode/.venv/bin/pip install -e .",
 
-  // Keep a copy of the Rust toolchain fresh on every rebuild.
+  // Keep the Rust toolchain fresh on every container start.
   "postStartCommand": "rustup update stable --no-self-update 2>/dev/null || true",
   // VS Code / GitHub Codespaces extensions
   "customizations": {
@@ -28,7 +29,8 @@
         "ms-python.vscode-pylance",
         "rust-lang.rust-analyzer",
         "tamasfe.even-better-toml",
-        "serayuzgur.crates",
+        "fill-labs.dependi",
+        "george-alisson.html-preview-vscode",
         "vadimcn.vscode-lldb",
         "github.copilot",
         "github.copilot-chat"

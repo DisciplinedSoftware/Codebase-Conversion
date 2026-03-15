@@ -43,7 +43,8 @@ ENV PATH="/home/vscode/.cargo/bin:${PATH}"
 COPY requirements.txt /tmp/requirements.txt
 RUN python -m venv /home/vscode/.venv \
     && /home/vscode/.venv/bin/pip install --upgrade pip --no-cache-dir \
-    && /home/vscode/.venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+    && /home/vscode/.venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
+    && echo 'source /home/vscode/.venv/bin/activate' >> /home/vscode/.bashrc
 
 ENV VIRTUAL_ENV="/home/vscode/.venv"
 ENV PATH="/home/vscode/.venv/bin:${PATH}"
