@@ -124,10 +124,13 @@ def run(output_dir: Path) -> None:
         console.print()
         console.print(f"  [bold cyan]Converting:[/bold cyan] {fn_name}  "
                       f"[dim]({routine.line_count} lines)[/dim]")
-        console.print(f"  [dim]LLM output ↓[/dim]")
+
+        stream_cb, stream_state = _make_stream_cb(fn_name)
+        llm.stream_callback = stream_cb
 
         result = strategy.convert(routine, progress_callback=_make_cb())
-        console.print()  # newline after streamed output
+        if stream_state["started"]:
+            console.print()  # newline after streamed output
         conversion_results.append(result)
 
         if result.success:
@@ -147,10 +150,10 @@ def run(output_dir: Path) -> None:
     crate_dir = scaffold_crate(output_dir, crate_name, rust_sources)
     console.print(f"  [green]✓[/green] Crate created at {crate_dir}")
 
-    build_ok, build_out = build_crate(crate_dir)
+    build_ok, build_out = _run_with_spinner("cargo build --release", build_crate, crate_dir)
     _show_build_result("cargo build --release", build_ok, build_out)
 
-    test_ok, test_out = test_crate(crate_dir)
+    test_ok, test_out = _run_with_spinner("cargo test", test_crate, crate_dir)
     _show_build_result("cargo test", test_ok, test_out)
 
     # --- 8. Accuracy -----------------------------------------------------------
@@ -314,7 +317,7 @@ def _ask_strategy() -> str:
 
 
 def _configure_llm(strategy_key: str) -> LLMClient:
-    llm = LLMClient(stream_callback=_make_stream_cb())
+    llm = LLMClient()
     if llm.is_available:
         console.print(
             f"\n  [green]✓[/green] LLM configured: "
@@ -327,7 +330,6 @@ def _configure_llm(strategy_key: str) -> LLMClient:
 
     configured = prompt_auth_setup(console)
     if configured is not None and configured.is_available:
-        configured.stream_callback = _make_stream_cb()
         return configured
 
     # Still no auth after setup (user skipped or setup failed)
@@ -343,13 +345,36 @@ def _configure_llm(strategy_key: str) -> LLMClient:
     return llm
 
 
-def _make_stream_cb():
-    """Return a stream callback that writes LLM output chunks to the console live."""
+def _run_with_spinner(label: str, fn, *args, **kwargs):
+    """Run *fn(*args, **kwargs)* with a transient spinner showing *label*."""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"  [dim]{label}…[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("")
+        return fn(*args, **kwargs)
+
+
+def _make_stream_cb(fn_name: str):
+    """Return a (callback, state) pair that writes LLM token chunks to the console live.
+
+    The header ``LLM output ↓`` is printed only on the first token so it never
+    appears for non-LLM strategies or when the LLM is unavailable.
+    """
     import sys
+    state: dict = {"started": False}
+
     def cb(chunk: str) -> None:
+        if not state["started"]:
+            console.print(f"\n  [dim][{fn_name}] LLM output ↓[/dim]")
+            state["started"] = True
         sys.stdout.write(chunk)
         sys.stdout.flush()
-    return cb
+
+    return cb, state
 
 
 def _make_cb():
