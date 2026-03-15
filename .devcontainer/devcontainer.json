@@ -18,8 +18,9 @@
   //      `gh auth login` and a .env file for LLM API access.
   "postCreateCommand": "/home/vscode/.venv/bin/pip install --upgrade pip && /home/vscode/.venv/bin/pip install --no-cache-dir -e . 2>/dev/null || true && bash scripts/setup_auth.sh",
 
-  // Keep a copy of the Rust toolchain fresh on every rebuild.
-  "postStartCommand": "rustup update stable --no-self-update 2>/dev/null || true",
+  // Keep a copy of the Rust toolchain fresh on every rebuild, and re-install
+  // the Python package in editable mode so source changes take effect immediately.
+  "postStartCommand": "rustup update stable --no-self-update 2>/dev/null || true && /home/vscode/.venv/bin/pip install -e . 2>/dev/null || true",
   // VS Code / GitHub Codespaces extensions
   "customizations": {
     "vscode": {
@@ -29,6 +30,8 @@
         "rust-lang.rust-analyzer",
         "tamasfe.even-better-toml",
         "serayuzgur.crates",
+        "belfz.migrate-crate",
+        "tht13.html-preview-vscode",
         "vadimcn.vscode-lldb",
         "github.copilot",
         "github.copilot-chat"
