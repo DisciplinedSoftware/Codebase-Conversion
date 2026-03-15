@@ -378,3 +378,48 @@ class LLMClient:
         ]
         return self._strip_code_fence(self.chat(messages))
 
+    def repair_accuracy(
+        self,
+        rust_source: str,
+        fortran_source: str,
+        function_name: str,
+        max_abs_error: float,
+    ) -> str:
+        """Re-translate Fortran→Rust after a numerical accuracy failure.
+
+        Passes the failing Rust alongside the original Fortran and an explicit
+        explanation of the most common mistake (row-major vs column-major indexing).
+        """
+        fn_lower = function_name.lower()
+        system = (
+            "You are an expert Fortran-to-Rust translator. "
+            "A previous translation produced numerically WRONG results due to incorrect "
+            "array indexing. You must fix this by strictly following the rule below.\n\n"
+            "CRITICAL: Fortran arrays are COLUMN-MAJOR (column index varies slowest in memory). "
+            "For a 2-D Fortran array A with leading dimension LDA:\n"
+            "  A(i, j)  in Fortran (1-indexed)  ==  a[(j-1)*lda + (i-1)]  in Rust (0-indexed)\n"
+            "Example for DGEMM (no-transpose): A[i,l] = a[l*lda + i], "
+            "B[l,j] = b[j*ldb + l], C[i,j] = c[j*ldc + i]. "
+            "DO NOT use row-major indexing like a[i*lda + l].\n\n"
+            f"The output MUST contain a top-level `pub fn {fn_lower}(...)` or "
+            f"`pub unsafe fn {fn_lower}(...)` — do NOT wrap it inside any `mod` block. "
+            "Use f64 for DOUBLE PRECISION, i32 for INTEGER, bool for LOGICAL, "
+            "u8 for CHARACTER*1 (pass ASCII byte literals like b'N'). "
+            "Return ONLY the corrected Rust source code — no markdown fences, no explanations."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    f"The Rust translation of `{function_name}` produced "
+                    f"max_abs_error={max_abs_error:.2e} vs the Fortran reference — "
+                    f"this indicates wrong array indexing.\n\n"
+                    f"Incorrect Rust code:\n{rust_source}\n\n"
+                    f"Original Fortran source:\n{fortran_source}\n\n"
+                    "Produce a CORRECT Rust translation using strict column-major indexing."
+                ),
+            },
+        ]
+        return self._strip_code_fence(self.chat(messages))
+
