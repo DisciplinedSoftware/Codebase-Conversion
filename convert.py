@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,18 @@ if _env_file.exists():
             os.environ.setdefault(_key.strip(), _val.strip())
 
 
+def _make_run_dir(base: Path) -> Path:
+    """Create and return a timestamped run directory inside *base*.
+
+    Each invocation produces a fresh snapshot directory:
+        <base>/report_YYYYMMDD_HHMMSS/
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = base / f"report_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="convert",
@@ -54,7 +67,11 @@ def main() -> None:
         type=Path,
         default=Path("output"),
         metavar="PATH",
-        help="Directory for output files (default: ./output).",
+        help=(
+            "Base directory for caches and run snapshots (default: ./output). "
+            "Each run creates output/<base>/report_YYYYMMDD_HHMMSS/ "
+            "so previous runs are preserved."
+        ),
     )
     parser.add_argument(
         "--non-interactive",
@@ -141,6 +158,10 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     console = Console()
     console.print(Rule("[bold cyan]Fortran-to-Rust  (non-interactive)[/bold cyan]"))
 
+    # Each run gets its own snapshot directory; BLAS sources are cached at output_dir.
+    run_dir = _make_run_dir(output_dir)
+    console.print(f"  [dim]Run directory: {run_dir}[/dim]")
+
     # --- 1. Resolve function list ---
     functions_to_convert = _parse_functions_arg(functions_arg)
     # Always pull in support routines required by most BLAS functions
@@ -210,7 +231,7 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
         if r.rust_source
     }
     crate_name = "blas_converted"
-    crate_dir = scaffold_crate(output_dir, crate_name, rust_sources)
+    crate_dir = scaffold_crate(run_dir, crate_name, rust_sources)
     console.print(f"  Crate: {crate_dir}")
 
     build_ok, build_out = build_crate(crate_dir)
@@ -252,7 +273,7 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     # --- 8. Report ---
     console.print("\n[bold]Generating report…[/bold]")
     md_path, html_path = generate_report(
-        output_dir=output_dir,
+        output_dir=run_dir,
         library="BLAS",
         strategy_name=STRATEGY_NAMES[strategy_key],
         conversion_results=conversion_results,
