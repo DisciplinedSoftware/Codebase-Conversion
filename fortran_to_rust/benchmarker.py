@@ -189,17 +189,20 @@ def _run_fortran_bench(
     bench_src: str,
     extra_sources: List[Path],
     keep_dir: Optional[Path] = None,
+    fn_stem: str = "bench",
 ) -> Optional[float]:
     """Compile *bench_src* and return measured ms/call.
 
     When *keep_dir* is provided the Fortran source and compiled executable are
     written there and **not** deleted afterwards, so they can be inspected.
     Otherwise a temporary directory is used and cleaned up automatically.
+    *fn_stem* is used as the filename base so that different functions in the
+    same *keep_dir* each get their own cached binary.
     """
     if keep_dir is not None:
         keep_dir.mkdir(parents=True, exist_ok=True)
-        bench_f = keep_dir / "bench.f"
-        exe = keep_dir / "bench"
+        bench_f = keep_dir / f"{fn_stem}.f"
+        exe = keep_dir / fn_stem
         lock = _get_fortran_lock(str(exe))
         with lock:
             if not exe.exists():
@@ -412,7 +415,7 @@ def run_benchmark(
     if fortran_source_path and fortran_source_path.exists():
         extra = [fortran_source_path] + _find_support_files(fortran_source_path.parent)
         bench_src = _generate_fortran_bench(fn, arg_names, arg_decls, assigned_dims, dataset_path, reps)
-        fortran_ms = _run_fortran_bench(bench_src, extra, keep_dir=fortran_keep_dir)
+        fortran_ms = _run_fortran_bench(bench_src, extra, keep_dir=fortran_keep_dir, fn_stem=f"{fn_lower}_bench")
         if fortran_ms is not None:
             dim_info = ", ".join(f"{k}={v}" for k, v in sorted(assigned_dims.items()))
             details.append(f"  Fortran (gfortran -O2): {fortran_ms:.3f} ms/call  [{dim_info}]")

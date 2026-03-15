@@ -929,7 +929,7 @@ def run_accuracy_check(
         fortran_out = _compile_run_fortran(
             driver, extra_sources,
             keep_dir=fortran_keep_dir,
-            file_stem=f"test_driver_{t}",
+            file_stem=f"{fn_lower}_test_driver_{t}",
         )
 
         if fortran_out is None:
