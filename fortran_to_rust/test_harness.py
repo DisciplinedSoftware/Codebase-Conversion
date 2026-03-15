@@ -3,15 +3,19 @@
 For each converted function, this module:
 
 1. **Parses** the Fortran argument declarations to discover types and array shapes.
-2. **Generates** a Fortran test driver (``PROGRAM``) on the fly, initialised with
-   deterministic pseudo-random values.
-3. **Compiles and runs** the Fortran driver with the *original* reference sources to
+2. **Generates** a :class:`TestDataset` — a single, deterministic set of concrete
+   input values shared by both drivers.
+3. **Generates** a Fortran test driver (``PROGRAM``) on the fly, initialised from
+   the shared dataset.
+4. **Compiles and runs** the Fortran driver with the *original* reference sources to
    obtain the expected outputs.
-4. **Generates** a Rust example binary that calls the converted function with the
-   same inputs and prints its outputs.
-5. **Compares** the two output streams; reports max / mean absolute error.
+5. **Generates** a Rust example binary that calls the converted function with the
+   same dataset values.
+6. **Compares** the two output streams; reports max / mean absolute error.
 
-Both step 3 and step 4 are driven entirely by the information in the
+Steps 3 and 5 are both driven by the same :class:`TestDataset` object, so it is
+structurally impossible for the two drivers to diverge on their inputs.
+Both step 4 and step 5 are driven entirely by the information in the
 :class:`~fortran_to_rust.parser.FortranRoutine` object, so the harness works for
 *any* function without requiring function-specific knowledge.
 """
@@ -25,7 +29,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from fortran_to_rust.rust_project import get_crate_lib_name
 
@@ -75,6 +79,66 @@ class ArgDecl:
     @property
     def is_logical(self) -> bool:
         return "LOGICAL" in self.ftype.upper()
+
+
+# ---------------------------------------------------------------------------
+# Test dataset dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TestDataset:
+    """Concrete input values for a single test case, shared by Fortran and Rust drivers.
+
+    ``values`` maps each uppercase argument name to its concrete value:
+    - scalar real args  → ``float``
+    - array real args   → ``List[float]`` (flat, column-major order)
+    - integer scalars   → ``int``
+    - char scalars      → ``str`` (single character, e.g. ``'N'``)
+    - logical scalars   → ``bool``
+    """
+
+    test_index: int
+    arg_names: List[str]
+    values: Dict[str, Union[float, int, bool, str, List[float]]]
+
+
+def generate_dataset(
+    arg_names: List[str],
+    arg_decls: Dict[str, "ArgDecl"],
+    assigned_dims: Dict[str, int],
+    test_index: int = 0,
+) -> TestDataset:
+    """Generate a single ``TestDataset`` for *test_index* from the given argument info.
+
+    A single ``random.Random(test_index)`` RNG is iterated over ``arg_names``
+    in order.  The same seed and iteration order are used in both
+    ``generate_fortran_driver`` and ``_generate_rust_example`` so that both
+    drivers are guaranteed to receive identical numerical inputs.
+    """
+    rng = random.Random(test_index)
+    values: Dict[str, Union[float, int, bool, str, List[float]]] = {}
+
+    for name in arg_names:
+        upper = name.upper()
+        decl = arg_decls.get(upper)
+        if decl is None:
+            continue
+        if decl.is_char and not decl.is_array:
+            values[upper] = "N"
+        elif decl.is_logical and not decl.is_array:
+            values[upper] = False
+        elif decl.is_integer and not decl.is_array:
+            values[upper] = assigned_dims.get(upper, 4)
+        elif decl.is_real and not decl.is_array:
+            values[upper] = rng.uniform(0.5, 2.0)
+        elif decl.is_real and decl.is_array:
+            sizes = _array_size(decl, assigned_dims)
+            total = 1
+            for s in (sizes or [4]):
+                total *= s
+            values[upper] = [rng.uniform(-1.0, 1.0) for _ in range(total)]
+
+    return TestDataset(test_index=test_index, arg_names=arg_names, values=values)
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +411,7 @@ def generate_fortran_driver(
     arg_names: List[str],
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
-    test_index: int = 0,
+    dataset: "TestDataset",
     routine_kind: str = "subroutine",
     return_ftype: str = "DOUBLE PRECISION",
 ) -> str:
@@ -356,13 +420,10 @@ def generate_fortran_driver(
     For subroutines the output is the modified arrays/scalars.
     For functions (``routine_kind='function'``) the return value is captured and printed.
 
-    Uses a single ``random.Random(test_index)`` seeded RNG and iterates over
-    ``arg_names`` in order — the same strategy as ``_generate_rust_example`` — so
-    that both drivers receive identical numerical inputs.
+    Accepts a ``TestDataset`` whose ``values`` were produced by ``generate_dataset``
+    so that the Fortran driver and the Rust example binary use an identical set of
+    concrete input values.
     """
-    # Single shared RNG iterated in arg_names order, matching _generate_rust_example.
-    rng = random.Random(test_index)
-
     # --- Collect grouped types for Fortran declarations ---
     int_scalars = [n.upper() for n in arg_names
                    if arg_decls.get(n.upper()) and arg_decls[n.upper()].is_integer
@@ -398,7 +459,7 @@ def generate_fortran_driver(
     if logical_scalars:
         decl_lines.append("      LOGICAL " + ", ".join(logical_scalars))
 
-    # --- Assignments and print loops in arg_names order (mirrors Rust RNG draws) ---
+    # --- Assignments and print loops, values sourced from the shared dataset ---
     assign_lines: List[str] = []
     print_lines: List[str] = []
 
@@ -407,24 +468,20 @@ def generate_fortran_driver(
         decl = arg_decls.get(upper)
         if decl is None:
             continue
+        val = dataset.values.get(upper)
         if decl.is_char and not decl.is_array:
             assign_lines.append(f"      {upper} = 'N'")
         elif decl.is_logical and not decl.is_array:
             assign_lines.append(f"      {upper} = .FALSE.")
         elif decl.is_integer and not decl.is_array:
-            assign_lines.append(f"      {upper} = {assigned_dims.get(upper, 4)}")
+            assign_lines.append(f"      {upper} = {val if val is not None else assigned_dims.get(upper, 4)}")
         elif decl.is_real and not decl.is_array:
-            val = rng.uniform(0.5, 2.0)  # draw from shared rng (same as Rust)
-            assign_lines.append(f"      {upper} = {_f90_double(val)}")
+            assign_lines.append(f"      {upper} = {_f90_double(float(val))}")  # type: ignore[arg-type]
         elif decl.is_real and decl.is_array:
             sizes = _array_size(decl, assigned_dims)
-            if not sizes:
+            if not sizes or val is None:
                 continue
-            total = 1
-            for s in sizes:
-                total *= s
-            # Draw values from shared rng in the same order as Rust (flat, column-major)
-            vals = [rng.uniform(-1.0, 1.0) for _ in range(total)]
+            vals: List[float] = list(val)  # type: ignore[arg-type]
             if len(sizes) == 1:
                 for i, v in enumerate(vals):
                     assign_lines.append(f"      {upper}({i + 1}) = {_f90_double(v)}")
@@ -611,11 +668,15 @@ def _generate_rust_example(
     arg_decls: Dict[str, ArgDecl],
     assigned_dims: Dict[str, int],
     crate_dir: Path,
-    test_index: int = 0,
+    dataset: "TestDataset",
     routine_kind: str = "subroutine",
     return_ftype: str = "DOUBLE PRECISION",
 ) -> bool:
-    """Write a Rust example binary that mirrors the Fortran test driver."""
+    """Write a Rust example binary that mirrors the Fortran test driver.
+
+    Values are sourced from *dataset* (produced by ``generate_dataset``) so that
+    the Rust example and the Fortran driver use an identical set of concrete inputs.
+    """
     fn_lower = routine_name.lower()
     crate_name = get_crate_lib_name(crate_dir)
     examples_dir = crate_dir / "examples"
@@ -624,30 +685,32 @@ def _generate_rust_example(
     inputs: List[str] = []
     call_args: List[str] = []
     prints: List[str] = []
-    rng = random.Random(test_index)
 
     for name in arg_names:
         decl = arg_decls.get(name.upper(), ArgDecl(name=name.upper(), ftype="DOUBLE PRECISION", dims=[]))
         rname = name.lower()
+        val = dataset.values.get(name.upper())
 
         if decl.is_char:
             inputs.append(f"    let {rname}: u8 = b'N';")
             call_args.append(rname)
         elif decl.is_integer and not decl.is_array:
-            val = assigned_dims.get(name.upper(), 4)
-            inputs.append(f"    let {rname}: i32 = {val};")
+            int_val = val if val is not None else assigned_dims.get(name.upper(), 4)
+            inputs.append(f"    let {rname}: i32 = {int_val};")
             call_args.append(rname)
         elif decl.is_real and not decl.is_array:
-            val = rng.uniform(0.5, 2.0)
-            inputs.append(f"    let {rname}: f64 = {val:.15f};")
+            inputs.append(f"    let {rname}: f64 = {float(val):.15f};")  # type: ignore[arg-type]
             call_args.append(rname)
         elif decl.is_real and decl.is_array:
-            sizes = _array_size(decl, assigned_dims)
-            total = 1
-            for s in (sizes or [4]):
-                total *= s
-            vals = ", ".join(f"{rng.uniform(-1.0, 1.0):.15f}_f64" for _ in range(total))
-            inputs.append(f"    let mut {rname} = vec![{vals}];")
+            arr_vals: List[float] = list(val) if val is not None else []  # type: ignore[arg-type]
+            if not arr_vals:
+                sizes = _array_size(decl, assigned_dims)
+                total = 1
+                for s in (sizes or [4]):
+                    total *= s
+                arr_vals = [0.0] * total
+            vals_str = ", ".join(f"{v:.15f}_f64" for v in arr_vals)
+            inputs.append(f"    let mut {rname} = vec![{vals_str}];")
             call_args.append(f"&mut {rname}")
             prints.append(f'    for v in &{rname} {{ println!("{{:.15e}}", v); }}')
         elif decl.is_logical:
@@ -768,8 +831,9 @@ def run_accuracy_check(
     )
 
     for t in range(num_tests):
+        dataset = generate_dataset(arg_names, arg_decls, assigned_dims, test_index=t)
         driver = generate_fortran_driver(
-            fn, arg_names, arg_decls, assigned_dims, test_index=t,
+            fn, arg_names, arg_decls, assigned_dims, dataset,
             routine_kind=routine_kind, return_ftype=return_ftype,
         )
         fortran_out = _compile_run_fortran(
@@ -788,7 +852,7 @@ def run_accuracy_check(
         rust_out: Optional[List[float]] = None
         if crate_dir and crate_dir.exists():
             _generate_rust_example(
-                fn, arg_names, arg_decls, assigned_dims, crate_dir, t,
+                fn, arg_names, arg_decls, assigned_dims, crate_dir, dataset,
                 routine_kind=routine_kind, return_ftype=return_ftype,
             )
             rust_out = _compile_run_rust_example(crate_dir, fn)
