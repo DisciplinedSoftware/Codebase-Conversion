@@ -16,9 +16,10 @@
     "source=codebase-conversion-cargo-git,target=/home/vscode/.cargo/git,type=volume"
   ],
 
-  // After the container is created, install the Python package in
-  // editable mode so `import fortran_to_rust` works out of the box.
-  "postCreateCommand": "/home/vscode/.venv/bin/pip install --no-cache-dir -e . 2>/dev/null || true",
+  // After the container is created, upgrade pip to the latest version and
+  // install the Python package in editable mode so `import fortran_to_rust`
+  // works out of the box.
+  "postCreateCommand": "/home/vscode/.venv/bin/pip install --upgrade pip && /home/vscode/.venv/bin/pip install --no-cache-dir -e . 2>/dev/null || true",
 
   // Keep a copy of the Rust toolchain fresh on every rebuild.
   "postStartCommand": "rustup update stable --no-self-update 2>/dev/null || true",
