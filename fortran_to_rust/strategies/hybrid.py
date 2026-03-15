@@ -85,19 +85,21 @@ class HybridStrategy(ConversionStrategy):
         if self.llm.is_available:
             try:
                 if c_source:
-                    # Validate accuracy of the rule-based skeleton BEFORE spending LLM on polish.
-                    # This is a single check — repair is handled by the pipeline's accuracy step.
-                    acc_passed = self._accuracy_check_once(rust_source, routine)
+                    # Accuracy repair loop BEFORE polish: the LLM must produce a working
+                    # conversion before we spend tokens on style improvements.
+                    rust_source, strategy_used, acc_passed = self._accuracy_repair_loop(
+                        rust_source, routine, strategy_used, cb
+                    )
                     if acc_passed is False:
                         cb(
-                            "  [yellow]Pre-polish accuracy check failed — skipping LLM polish; "
-                            "pipeline will repair.[/yellow]"
+                            "  [yellow]Accuracy repair exhausted — skipping LLM polish; "
+                            "conversion marked as failed.[/yellow]"
                         )
                     else:
                         cb(f"[3/hybrid] Polishing with LLM ({self.llm.provider}/{self.llm.model})…")
                         polished = self.llm.polish_unsafe_rust(rust_source, routine.name)
                         if polished.strip():
-                            # Quick post-polish accuracy sanity check — revert if polish broke things
+                            # Single post-polish check — revert if polish degraded accuracy
                             post_ok = self._accuracy_check_once(polished, routine)
                             if post_ok is not False:
                                 rust_source = polished
@@ -113,12 +115,13 @@ class HybridStrategy(ConversionStrategy):
                     if translated.strip():
                         rust_source = translated
                         strategy_used = "LLM translation"
-                    # Validate post-translation; the stub skeleton couldn't be validated before
-                    acc_passed = self._accuracy_check_once(rust_source, routine)
+                    # Accuracy repair loop after LLM translation
+                    rust_source, strategy_used, acc_passed = self._accuracy_repair_loop(
+                        rust_source, routine, strategy_used, cb
+                    )
                     if acc_passed is False:
                         cb(
-                            "  [yellow]Post-translation accuracy check failed; "
-                            "pipeline will repair.[/yellow]"
+                            "  [yellow]Accuracy repair exhausted — conversion marked as failed.[/yellow]"
                         )
             except LLMUnavailableError:
                 pass
@@ -135,24 +138,80 @@ class HybridStrategy(ConversionStrategy):
         )
 
     # ------------------------------------------------------------------
-    # Accuracy validation
+    # Accuracy validation and repair
     # ------------------------------------------------------------------
 
+    _MAX_ACCURACY_RETRIES = 5
     _ACCURACY_TOLERANCE = 1e-6  # tighter than test_harness default for early bail-out
+
+    def _accuracy_repair_loop(
+        self,
+        rust_source: str,
+        routine: FortranRoutine,
+        strategy_used: str,
+        cb,
+    ) -> tuple:
+        """Check accuracy and repair with LLM until passing or retries exhausted.
+
+        Returns ``(rust_source, strategy_used, passed)`` where *passed* is:
+            True   – accuracy within tolerance
+            False  – still failing after all retries
+            None   – validation skipped (no Fortran source file, or compile failure)
+        """
+        from fortran_to_rust.rust_project import build_crate, scaffold_crate
+        from fortran_to_rust.test_harness import run_accuracy_check
+
+        fortran_path = (
+            self.output_dir / "fortran" / "blas" / f"{routine.name.lower()}.f"
+        )
+        if not fortran_path.exists():
+            return rust_source, strategy_used, None
+
+        for attempt in range(self._MAX_ACCURACY_RETRIES):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                crate_dir = scaffold_crate(tmp, "acc_check", {routine.name: rust_source})
+                build_ok, _ = build_crate(crate_dir)
+                if not build_ok:
+                    return rust_source, strategy_used, None  # compile errors handled by build step
+
+                acc = run_accuracy_check(
+                    routine.name,
+                    fortran_path,
+                    crate_dir,
+                    routine=routine,
+                    num_tests=1,
+                )
+
+            if acc.max_abs_error is None:
+                return rust_source, strategy_used, None  # comparison not possible
+
+            if acc.max_abs_error <= self._ACCURACY_TOLERANCE:
+                return rust_source, strategy_used, True  # passed
+
+            cb(
+                f"  [yellow]Accuracy check failed (max_err={acc.max_abs_error:.2e}), "
+                f"repairing (attempt {attempt + 1}/{self._MAX_ACCURACY_RETRIES})…[/yellow]"
+            )
+            try:
+                repaired = self.llm.repair_accuracy(
+                    rust_source, routine.source, routine.name, acc.max_abs_error
+                )
+                if repaired.strip():
+                    rust_source = repaired
+                    strategy_used += f" + accuracy-repair×{attempt + 1}"
+            except Exception as exc:
+                cb(f"  [yellow]Accuracy repair skipped: {exc}[/yellow]")
+                return rust_source, strategy_used, False
+
+        return rust_source, strategy_used, False  # exhausted all retries
 
     def _accuracy_check_once(
         self,
         rust_source: str,
         routine: FortranRoutine,
     ) -> Optional[bool]:
-        """Build a temp crate and run one accuracy test.
-
-        Returns:
-            True   – accuracy within tolerance
-            False  – accuracy outside tolerance
-            None   – validation skipped (no Fortran source file, or compile failure;
-                     compile failures are the build step's concern)
-        """
+        """Run one accuracy test with no repair. Returns True/False/None."""
         from fortran_to_rust.rust_project import build_crate, scaffold_crate
         from fortran_to_rust.test_harness import run_accuracy_check
 
@@ -167,7 +226,7 @@ class HybridStrategy(ConversionStrategy):
             crate_dir = scaffold_crate(tmp, "acc_check", {routine.name: rust_source})
             build_ok, _ = build_crate(crate_dir)
             if not build_ok:
-                return None  # compile errors are handled by the pipeline's build step
+                return None
 
             acc = run_accuracy_check(
                 routine.name,
@@ -178,7 +237,7 @@ class HybridStrategy(ConversionStrategy):
             )
 
         if acc.max_abs_error is None:
-            return None  # comparison not possible (e.g. no Fortran compiler)
+            return None
         return acc.max_abs_error <= self._ACCURACY_TOLERANCE
 
     # ------------------------------------------------------------------

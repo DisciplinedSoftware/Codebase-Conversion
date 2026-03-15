@@ -63,25 +63,37 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _failed_accuracy_fns(accuracy_results: List["AccuracyResult"]) -> List[str]:
-    """Return lower-cased names of functions whose accuracy check failed."""
+def _failed_accuracy_fns(
+    accuracy_results: List["AccuracyResult"],
+    exhausted_fns: "set[str]",
+) -> List[str]:
+    """Return lower-cased names of functions whose accuracy check failed.
+
+    Functions in *exhausted_fns* are excluded — their conversion step already
+    exhausted all repair retries and they should not be retried by the pipeline.
+    """
     return [
         acc.function_name.lower()
         for acc in accuracy_results
-        if not acc.passed
+        if not acc.passed and acc.function_name.lower() not in exhausted_fns
     ]
 
 
-def _failed_bench_fns(bench_results: List["BenchResult"]) -> List[str]:
+def _failed_bench_fns(
+    bench_results: List["BenchResult"],
+    exhausted_fns: "set[str]",
+) -> List[str]:
     """Return lower-cased names of functions whose Rust benchmark could not run.
 
     A *slow* Rust result is not treated as a failure — only results where the
     Rust binary failed to compile or execute (``rust_time_ms is None``).
+    Functions in *exhausted_fns* are excluded for the same reason as above.
     """
     return [
         b.function_name.lower()
         for b in bench_results
         if b.rust_time_ms is None and not b.error_message
+        and b.function_name.lower() not in exhausted_fns
     ]
 
 
@@ -254,6 +266,20 @@ def run_post_conversion_loop(
     bench_results: List["BenchResult"] = []
     retry_count = 0
 
+    # Functions whose conversion step already exhausted all accuracy repair
+    # retries (success=False).  These are permanently failed and must not be
+    # fed back into the pipeline's revalidation loop.
+    exhausted_fns: set = {
+        r.routine_name.lower()
+        for r in conv_results
+        if not r.success
+    }
+    if exhausted_fns:
+        _log(
+            f"  [yellow]⚠  Conversion failed (accuracy exhausted) for: "
+            f"{', '.join(sorted(exhausted_fns))} — skipping pipeline retry for these.[/yellow]"
+        )
+
     for attempt in range(max_retries + 1):
         is_retry = attempt > 0
         if is_retry:
@@ -325,8 +351,8 @@ def run_post_conversion_loop(
                 _log(f"  {d}")
 
         # ── Decide whether to retry ───────────────────────────────────────────
-        failed_acc = _failed_accuracy_fns(accuracy_results)
-        failed_bench = _failed_bench_fns(bench_results)
+        failed_acc = _failed_accuracy_fns(accuracy_results, exhausted_fns)
+        failed_bench = _failed_bench_fns(bench_results, exhausted_fns)
         failing_fns = list(dict.fromkeys(failed_acc + failed_bench))
 
         if not failing_fns:
@@ -342,7 +368,8 @@ def run_post_conversion_loop(
         retry_count += 1
         _log(
             f"\n[bold yellow]⚠  Checks failed for: {', '.join(failing_fns)}. "
-            f"Re-converting and retrying (attempt {attempt + 1}/{max_retries})…[/bold yellow]"
+            f"Applying targeted accuracy repair and re-validating "
+            f"(attempt {attempt + 1}/{max_retries})…[/bold yellow]"
         )
 
         accuracy_map = {acc.function_name.lower(): acc for acc in accuracy_results}

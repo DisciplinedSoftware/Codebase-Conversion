@@ -129,13 +129,21 @@ class AgenticStrategy(ConversionStrategy):
                     cb(f"  [red]LLM repair failed: {exc}[/red]")
                     break
 
-        # ---- Accuracy validation before idiomisation ----------------------
-        # Single check only — repair is handled by the pipeline's accuracy step.
-        acc_passed = self._fallback._accuracy_check_once(rust_source, routine)
+        # ---- Accuracy repair loop before idiomisation ---------------------
+        # The LLM must produce a numerically correct translation before we
+        # spend further tokens on idiomisation. If all retries are exhausted,
+        # skip Phase 4 and mark the conversion as failed.
+        strategy_lbl = (
+            f"Agentic ({self.llm.provider}/{self.llm.model}, "
+            f"{min(len(questions), self.max_questions)} Q&A rounds)"
+        )
+        rust_source, strategy_lbl, acc_passed = self._fallback._accuracy_repair_loop(
+            rust_source, routine, strategy_lbl, cb
+        )
         if acc_passed is False:
             cb(
-                "  [yellow]Pre-idiomisation accuracy check failed — skipping idiomisation pass; "
-                "pipeline will repair.[/yellow]"
+                "  [yellow]Accuracy repair exhausted — skipping idiomisation pass; "
+                "conversion marked as failed.[/yellow]"
             )
         else:
             # ---- Phase 4: Idiomisation (clippy-guided) ---------------------
@@ -151,8 +159,7 @@ class AgenticStrategy(ConversionStrategy):
             routine_name=routine.name,
             rust_source=rust_source,
             success=(acc_passed is not False),
-            strategy_used=f"Agentic ({self.llm.provider}/{self.llm.model}, "
-                          f"{min(len(questions), self.max_questions)} Q&A rounds)",
+            strategy_used=strategy_lbl,
             repair_rounds=repair_rounds,
             compiler_errors=errors,
         )
