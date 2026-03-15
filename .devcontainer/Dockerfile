@@ -25,9 +25,14 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV PATH="/home/vscode/.cargo/bin:${PATH}"
 
 # ---------------------------------------------------------------------------
-# Python dependencies
+# Python virtual environment and dependencies
 # ---------------------------------------------------------------------------
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python -m venv /home/vscode/.venv \
+    && /home/vscode/.venv/bin/pip install --upgrade pip --no-cache-dir \
+    && /home/vscode/.venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+ENV VIRTUAL_ENV="/home/vscode/.venv"
+ENV PATH="/home/vscode/.venv/bin:${PATH}"
 
 USER root
