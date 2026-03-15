@@ -24,6 +24,275 @@ from fortran_to_rust.strategies.base import ConversionResult
 from fortran_to_rust.test_harness import AccuracyResult
 
 
+def generate_comparison_report(
+    run_dir: Path,
+    library: str,
+    all_results: Dict,
+    open_browser: bool = False,
+) -> Tuple[Path, Path]:
+    """Write a single MD+HTML report covering all three strategies.
+
+    Files land at ``run_dir/reports/<ts>_report.{md,html}`` reusing the
+    timestamp embedded in *run_dir*'s name so all filenames stay consistent.
+    Returns ``(md_path, html_path)``.
+    """
+    from fortran_to_rust.strategies import STRATEGY_NAMES
+
+    reports_dir = run_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    dir_ts = run_dir.name
+    if dir_ts.startswith("report_") and len(dir_ts) == len("report_YYYYMMDD_HHMMSS"):
+        ts = dir_ts[len("report_"):]
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    try:
+        generated_str = datetime.datetime.strptime(ts, "%Y%m%d_%H%M%S").strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    except ValueError:
+        generated_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    report_path = reports_dir / f"{ts}_report.md"
+    lines: List[str] = []
+    _section = lambda title: lines.extend([f"\n## {title}\n"])
+
+    lines.append("# Fortran-to-Rust Comparison Report")
+    lines.append(f"\n**Library:** {library}  ")
+    lines.append("**Strategies:** All (1 · LLM-First, 2 · Agentic, 3 · Hybrid)  ")
+    lines.append(f"**Generated:** {generated_str}  ")
+
+    _section("Overview")
+    lines.append("| Strategy | Build | Tests | Accuracy | Max Abs Error | Avg Speedup |")
+    lines.append("|----------|-------|-------|----------|---------------|-------------|")
+    for key in ("1", "2", "3"):
+        res = all_results.get(key, {})
+        name = STRATEGY_NAMES.get(key, key)
+        if res.get("error") and not res.get("conversion_results"):
+            lines.append(f"| **{key}** {name} | ❌ | ❌ | ❌ | — | — |")
+            continue
+        build = "✅" if res.get("build_ok") else "❌"
+        tests = "✅" if res.get("test_ok") else "❌"
+        acc_results = res.get("accuracy_results", [])
+        acc_passed = all(a.passed for a in acc_results if a.max_abs_error is not None)
+        accuracy = "✅" if (acc_results and acc_passed) else ("❌" if acc_results else "—")
+        max_err = max(
+            (a.max_abs_error for a in acc_results if a.max_abs_error is not None),
+            default=None,
+        )
+        bench_results = res.get("bench_results", [])
+        speedups = [b.speedup for b in bench_results if b.speedup]
+        lines.append(
+            f"| **{key}** {name} | {build} | {tests} | {accuracy} "
+            f"| {f'{max_err:.2e}' if max_err is not None else '—'} "
+            f"| {f'{sum(speedups)/len(speedups):.2f}×' if speedups else '—'} |"
+        )
+
+    for key in ("1", "2", "3"):
+        res = all_results.get(key, {})
+        name = STRATEGY_NAMES.get(key, key)
+        _section(f"Strategy {key} — {name}")
+        if res.get("error") and not res.get("conversion_results"):
+            lines.append(f"**Error:** {res['error']}")
+            continue
+        crate_dir = res.get("crate_dir")
+        if crate_dir:
+            lines.append(f"**Crate:** `{crate_dir}`  ")
+        conversion_results = res.get("conversion_results", [])
+        lines.append("| Function | Strategy Used | Lines | Repair Rounds | Status |")
+        lines.append("|----------|--------------|-------|---------------|--------|")
+        for r in conversion_results:
+            status = "✅ OK" if r.success else "❌ Failed"
+            lines.append(
+                f"| `{r.routine_name}` | {r.strategy_used} "
+                f"| {_get_line_count(r)} | {r.repair_rounds} | {status} |"
+            )
+        build_ok = res.get("build_ok", False)
+        test_ok = res.get("test_ok", False)
+        lines.append(
+            f"\n- `cargo build --release`: {'✅ passed' if build_ok else '❌ failed'}"
+        )
+        lines.append(f"- `cargo test`: {'✅ passed' if test_ok else '❌ failed'}")
+        accuracy_results = res.get("accuracy_results", [])
+        if accuracy_results:
+            lines.append("\n| Function | Max Abs Error | Mean Abs Error | Result |")
+            lines.append("|----------|---------------|----------------|--------|")
+            for a in accuracy_results:
+                max_e = f"{a.max_abs_error:.2e}" if a.max_abs_error is not None else "N/A"
+                mean_e = f"{a.mean_abs_error:.2e}" if a.mean_abs_error is not None else "N/A"
+                lines.append(
+                    f"| `{a.function_name}` | {max_e} | {mean_e} | {'✅' if a.passed else '❌'} |"
+                )
+        bench_results = res.get("bench_results", [])
+        if bench_results:
+            lines.append("\n| Function | Fortran (ms/call) | Rust (ms/call) | Speedup |")
+            lines.append("|----------|-------------------|----------------|---------|")
+            for b in bench_results:
+                f_ms = f"{b.fortran_time_ms:.3f}" if b.fortran_time_ms else "N/A"
+                r_ms = f"{b.rust_time_ms:.3f}" if b.rust_time_ms else "N/A"
+                sp = f"{b.speedup:.2f}×" if b.speedup else "N/A"
+                lines.append(f"| `{b.function_name}` | {f_ms} | {r_ms} | {sp} |")
+        for r in conversion_results:
+            if r.rust_source:
+                snippet = r.rust_source[:1500]
+                truncated = "…" if len(r.rust_source) > 1500 else ""
+                lines.append(f"\n**`{r.routine_name}` generated code:**\n")
+                lines.append(f"```rust\n{snippet}{truncated}\n```")
+
+    report_path.write_text("\n".join(lines))
+
+    html_path = _write_comparison_html_report(
+        report_path.with_suffix(".html"),
+        library=library,
+        all_results=all_results,
+        generated_str=generated_str,
+    )
+
+    if open_browser:
+        _serve_report(html_path)
+
+    return report_path, html_path
+
+
+def _write_comparison_html_report(
+    html_path: Path,
+    library: str,
+    all_results: Dict,
+    generated_str: Optional[str] = None,
+) -> Path:
+    from fortran_to_rust.strategies import STRATEGY_NAMES
+
+    ts = generated_str or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def section(title: str) -> str:
+        return f"<h2>{_esc(title)}</h2>\n"
+
+    parts: List[str] = [
+        "<!DOCTYPE html><html lang='en'><head>",
+        "<meta charset='UTF-8'>",
+        "<meta name='viewport' content='width=device-width,initial-scale=1.0'>",
+        f"<title>Fortran→Rust Comparison — {_esc(library)}</title>",
+        f"<style>{_HTML_CSS}</style>",
+        "</head><body>",
+        "<h1>Fortran→Rust Comparison Report</h1>",
+        "<div class='summary-grid'>",
+        f"<div class='card'><div class='card-label'>Library</div><div class='card-value'>{_esc(library)}</div></div>",
+        "<div class='card'><div class='card-label'>Strategies</div><div class='card-value' style='font-size:16px'>All 3</div></div>",
+        f"<div class='card'><div class='card-label'>Generated</div><div class='card-value' style='font-size:14px'>{_esc(ts)}</div></div>",
+        "</div>",
+    ]
+
+    parts.append(section("Overview"))
+    parts.append(
+        "<table><tr>"
+        "<th>Strategy</th><th>Build</th><th>Tests</th>"
+        "<th>Accuracy</th><th>Max Error</th><th>Avg Speedup</th>"
+        "</tr>"
+    )
+    for key in ("1", "2", "3"):
+        res = all_results.get(key, {})
+        name = STRATEGY_NAMES.get(key, key)
+        if res.get("error") and not res.get("conversion_results"):
+            parts.append(
+                f"<tr><td><strong>{_esc(key)}</strong> {_esc(name)}</td>"
+                "<td>❌</td><td>❌</td><td>❌</td><td>—</td><td>—</td></tr>"
+            )
+            continue
+        build = _status_badge(res.get("build_ok", False))
+        tests = _status_badge(res.get("test_ok", False))
+        acc_results = res.get("accuracy_results", [])
+        acc_passed = all(a.passed for a in acc_results if a.max_abs_error is not None)
+        acc_badge = (
+            "<span class='ok'>✅</span>"
+            if (acc_results and acc_passed)
+            else ("<span class='fail'>❌</span>" if acc_results else "—")
+        )
+        max_err = max(
+            (a.max_abs_error for a in acc_results if a.max_abs_error is not None),
+            default=None,
+        )
+        max_err_str = f"{max_err:.2e}" if max_err is not None else "—"
+        bench_results = res.get("bench_results", [])
+        speedups = [b.speedup for b in bench_results if b.speedup]
+        speedup_str = f"{sum(speedups)/len(speedups):.2f}×" if speedups else "—"
+        parts.append(
+            f"<tr><td><strong>{_esc(key)}</strong> {_esc(name)}</td>"
+            f"<td style='text-align:center'>{build}</td>"
+            f"<td style='text-align:center'>{tests}</td>"
+            f"<td style='text-align:center'>{acc_badge}</td>"
+            f"<td style='text-align:right'>{_esc(max_err_str)}</td>"
+            f"<td style='text-align:right'>{_esc(speedup_str)}</td></tr>"
+        )
+    parts.append("</table>")
+
+    for key in ("1", "2", "3"):
+        res = all_results.get(key, {})
+        name = STRATEGY_NAMES.get(key, key)
+        parts.append(f"<h2>Strategy {_esc(key)} — {_esc(name)}</h2>")
+        if res.get("error") and not res.get("conversion_results"):
+            parts.append(f"<p class='fail'>Error: {_esc(res['error'])}</p>")
+            continue
+        crate_dir = res.get("crate_dir")
+        if crate_dir:
+            parts.append(f"<p class='dim'>Crate: <code>{_esc(str(crate_dir))}</code></p>")
+        conversion_results = res.get("conversion_results", [])
+        if conversion_results:
+            parts.append("<table><tr><th>Function</th><th>Strategy Used</th><th>Lines</th><th>Repair Rounds</th><th>Status</th></tr>")
+            for r in conversion_results:
+                status = "<span class='ok'>✅ OK</span>" if r.success else "<span class='fail'>❌ Failed</span>"
+                parts.append(
+                    f"<tr><td><code>{_esc(r.routine_name)}</code></td>"
+                    f"<td>{_esc(r.strategy_used)}</td>"
+                    f"<td>{_get_line_count(r)}</td>"
+                    f"<td>{r.repair_rounds}</td>"
+                    f"<td>{status}</td></tr>"
+                )
+            parts.append("</table>")
+        build_ok = res.get("build_ok", False)
+        test_ok = res.get("test_ok", False)
+        parts.append(f"<p>cargo build --release: {_status_badge(build_ok)}</p>")
+        parts.append(f"<p>cargo test: {_status_badge(test_ok)}</p>")
+        accuracy_results = res.get("accuracy_results", [])
+        if accuracy_results:
+            parts.append("<table><tr><th>Function</th><th>Max Abs Error</th><th>Mean Abs Error</th><th>Result</th></tr>")
+            for a in accuracy_results:
+                max_e = f"{a.max_abs_error:.2e}" if a.max_abs_error is not None else "N/A"
+                mean_e = f"{a.mean_abs_error:.2e}" if a.mean_abs_error is not None else "N/A"
+                badge = "<span class='ok'>✅</span>" if a.passed else "<span class='fail'>❌</span>"
+                parts.append(
+                    f"<tr><td><code>{_esc(a.function_name)}</code></td>"
+                    f"<td>{_esc(max_e)}</td><td>{_esc(mean_e)}</td><td>{badge}</td></tr>"
+                )
+            parts.append("</table>")
+            for a in accuracy_results:
+                if a.details:
+                    details_html = "<br>".join(_esc(d) for d in a.details)
+                    parts.append(f"<details><summary><code>{_esc(a.function_name)}</code> test details</summary><p class='dim'>{details_html}</p></details>")
+        bench_results = res.get("bench_results", [])
+        if bench_results:
+            parts.append("<table><tr><th>Function</th><th>Fortran (ms/call)</th><th>Rust (ms/call)</th><th>Speedup</th></tr>")
+            for b in bench_results:
+                f_ms = f"{b.fortran_time_ms:.3f}" if b.fortran_time_ms else "N/A"
+                r_ms = f"{b.rust_time_ms:.3f}" if b.rust_time_ms else "N/A"
+                sp = f"{b.speedup:.2f}×" if b.speedup else "N/A"
+                parts.append(
+                    f"<tr><td><code>{_esc(b.function_name)}</code></td>"
+                    f"<td>{_esc(f_ms)}</td><td>{_esc(r_ms)}</td><td>{_esc(sp)}</td></tr>"
+                )
+            parts.append("</table>")
+        for r in conversion_results:
+            if r.rust_source:
+                snippet = _esc(r.rust_source[:2000])
+                trunc = "<span class='dim'>… (truncated)</span>" if len(r.rust_source) > 2000 else ""
+                parts.append(f"<h3><code>{_esc(r.routine_name)}</code></h3>")
+                parts.append(f"<pre><code>{snippet}{trunc}</code></pre>")
+
+    parts.append("</body></html>")
+    html_path.write_text("\n".join(parts), encoding="utf-8")
+    return html_path
+
+
 def generate_report(
     output_dir: Path,
     library: str,

@@ -29,6 +29,7 @@ from fortran_to_rust.test_harness import (
     _assign_dims,
     _find_support_files,
     _fortran_call,
+    _get_fortran_lock,
     parse_arg_declarations,
 )
 
@@ -166,19 +167,22 @@ def _run_fortran_bench(
         keep_dir.mkdir(parents=True, exist_ok=True)
         bench_f = keep_dir / "bench.f"
         exe = keep_dir / "bench"
-        bench_f.write_text(bench_src)
-        cmd = ["gfortran", "-O2", "-o", str(exe), str(bench_f)]
-        cmd += [str(s) for s in extra_sources]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            return None
-        run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
-        if run.returncode != 0:
-            return None
-        try:
-            return float(run.stdout.strip())
-        except ValueError:
-            return None
+        lock = _get_fortran_lock(str(exe))
+        with lock:
+            if not exe.exists():
+                bench_f.write_text(bench_src)
+                cmd = ["gfortran", "-O2", "-o", str(exe), str(bench_f)]
+                cmd += [str(s) for s in extra_sources]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode != 0:
+                    return None
+            run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+            if run.returncode != 0:
+                return None
+            try:
+                return float(run.stdout.strip())
+            except ValueError:
+                return None
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -300,6 +304,7 @@ def run_benchmark(
     *,
     routine=None,
     reps: int = _REPS,
+    fortran_ref_dir: Optional[Path] = None,
 ) -> BenchResult:
     """Benchmark *function_name* in both Fortran and Rust.
 
@@ -330,7 +335,11 @@ def run_benchmark(
     if fortran_source_path and fortran_source_path.exists():
         extra = [fortran_source_path] + _find_support_files(fortran_source_path.parent)
         bench_src = _generate_fortran_bench(fn, arg_names, arg_decls, assigned_dims, reps)
-        fortran_keep_dir = (crate_dir.parent / "fortran") if crate_dir else None
+        fortran_keep_dir = (
+            fortran_ref_dir
+            if fortran_ref_dir is not None
+            else ((crate_dir.parent / "fortran") if crate_dir else None)
+        )
         fortran_ms = _run_fortran_bench(bench_src, extra, keep_dir=fortran_keep_dir)
         if fortran_ms is not None:
             dim_info = ", ".join(f"{k}={v}" for k, v in sorted(assigned_dims.items()))

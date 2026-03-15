@@ -246,20 +246,21 @@ def _run_all_parallel_interactive(
 ) -> None:
     """Run all three strategies in parallel using pre-fetched source data."""
     from fortran_to_rust.compare import (
-        make_compare_dir,
         print_comparison_table,
         run_all_parallel,
-        write_comparison_report,
     )
     from fortran_to_rust.parser import parse_file
 
     console.print()
     console.print(Panel("[bold]Running all 3 strategies in parallel…[/bold]", style="cyan"))
 
-    compare_dir = make_compare_dir(output_dir)
-    console.print(f"  [dim]Compare directory: {compare_dir}[/dim]")
+    # Single run directory — same naming convention as single-strategy runs.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"report_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"  [dim]Run directory: {run_dir}[/dim]")
 
-    # Parse sources (needed by workers)
+    # Parse sources (needed by workers; source_map already has them).
     all_routines = []
     for path in source_map.values():
         all_routines.extend(parse_file(path))
@@ -289,24 +290,20 @@ def _run_all_parallel_interactive(
                 )
             return _update
 
-        all_results = run_all_parallel(
+        all_results, md_path, html_path = run_all_parallel(
             output_dir=output_dir,
-            compare_dir=compare_dir,
+            run_dir=run_dir,
             functions_to_convert=functions_to_convert,
             source_map=source_map,
             routine_map=routine_map,
+            library="BLAS",
             progress_update=lambda key, msg: _make_update(key)(msg),
         )
 
     console.print(Rule("[bold cyan]Comparison Summary[/bold cyan]", style="cyan"))
     print_comparison_table(console, all_results)
-
-    report_path = write_comparison_report(compare_dir, all_results)
-    console.print(f"\n  Comparison report: [bold green]{report_path}[/bold green]")
-    for key in ("1", "2", "3"):
-        html = all_results.get(key, {}).get("html_path")
-        if html:
-            console.print(f"  Strategy {key} HTML:  [green]{html}[/green]")
+    console.print(f"\n  [green]Markdown:[/green]  {md_path}")
+    console.print(f"  [green]HTML:[/green]      {html_path}")
     console.print(Rule(style="cyan"))
 
 

@@ -22,11 +22,24 @@ import random
 import re
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 _TOLERANCE = 1e-10  # max acceptable absolute error
+
+# Per-file-stem locks prevent multiple threads from compiling the same Fortran
+# driver simultaneously when a shared fortran_ref_dir is used across strategies.
+_fortran_locks: Dict[str, threading.Lock] = {}
+_locks_mutex = threading.Lock()
+
+
+def _get_fortran_lock(key: str) -> threading.Lock:
+    with _locks_mutex:
+        if key not in _fortran_locks:
+            _fortran_locks[key] = threading.Lock()
+        return _fortran_locks[key]
 
 # ---------------------------------------------------------------------------
 # Argument declaration dataclass
@@ -514,19 +527,22 @@ def _compile_run_fortran(
         keep_dir.mkdir(parents=True, exist_ok=True)
         driver_f = keep_dir / f"{file_stem}.f"
         exe = keep_dir / file_stem
-        driver_f.write_text(driver_src)
-        cmd = ["gfortran", "-O2", "-o", str(exe), str(driver_f)]
-        cmd += [str(s) for s in extra_sources]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            return None
-        run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
-        if run.returncode != 0:
-            return None
-        try:
-            return [float(line.strip()) for line in run.stdout.splitlines() if line.strip()]
-        except ValueError:
-            return None
+        lock = _get_fortran_lock(str(keep_dir / file_stem))
+        with lock:
+            if not exe.exists():
+                driver_f.write_text(driver_src)
+                cmd = ["gfortran", "-O2", "-o", str(exe), str(driver_f)]
+                cmd += [str(s) for s in extra_sources]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                if result.returncode != 0:
+                    return None
+            run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            if run.returncode != 0:
+                return None
+            try:
+                return [float(line.strip()) for line in run.stdout.splitlines() if line.strip()]
+            except ValueError:
+                return None
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -687,6 +703,7 @@ def run_accuracy_check(
     *,
     routine=None,   # FortranRoutine | None
     num_tests: int = 3,
+    fortran_ref_dir: Optional[Path] = None,
 ) -> AccuracyResult:
     """Run accuracy comparison for *function_name*.
 
@@ -735,7 +752,11 @@ def run_accuracy_check(
     routine_kind   = getattr(routine, "kind", "subroutine")
     return_ftype   = getattr(routine, "return_type", None) or "DOUBLE PRECISION"
 
-    fortran_keep_dir = (crate_dir.parent / "fortran") if crate_dir else None
+    fortran_keep_dir = (
+        fortran_ref_dir
+        if fortran_ref_dir is not None
+        else ((crate_dir.parent / "fortran") if crate_dir else None)
+    )
 
     for t in range(num_tests):
         driver = generate_fortran_driver(

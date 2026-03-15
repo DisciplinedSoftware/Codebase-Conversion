@@ -363,10 +363,8 @@ def _run_compare(output_dir: Path, functions_arg: str) -> None:
 
     from fortran_to_rust.call_graph import build_call_graph, render_graph
     from fortran_to_rust.compare import (
-        make_compare_dir,
         print_comparison_table,
         run_all_parallel,
-        write_comparison_report,
     )
     from fortran_to_rust.fetcher import fetch_blas
     from fortran_to_rust.parser import parse_file
@@ -375,8 +373,8 @@ def _run_compare(output_dir: Path, functions_arg: str) -> None:
     console = Console()
     console.print(Rule("[bold cyan]Fortran-to-Rust  (compare all strategies)[/bold cyan]"))
 
-    compare_dir = make_compare_dir(output_dir)
-    console.print(f"  [dim]Compare directory: {compare_dir}[/dim]")
+    run_dir = _make_run_dir(output_dir)
+    console.print(f"  [dim]Run directory: {run_dir}[/dim]")
 
     # --- 1. Resolve function list ---
     functions_to_convert = _parse_functions_arg(functions_arg)
@@ -437,12 +435,13 @@ def _run_compare(output_dir: Path, functions_arg: str) -> None:
                 )
             return _update
 
-        all_results = run_all_parallel(
+        all_results, md_path, html_path = run_all_parallel(
             output_dir=output_dir,
-            compare_dir=compare_dir,
+            run_dir=run_dir,
             functions_to_convert=functions_to_convert,
             source_map=source_map,
             routine_map=routine_map,
+            library="BLAS",
             progress_update=lambda key, msg: _make_update(key)(msg),
         )
 
@@ -450,13 +449,9 @@ def _run_compare(output_dir: Path, functions_arg: str) -> None:
     console.print(Rule("[bold cyan]Comparison Summary[/bold cyan]"))
     print_comparison_table(console, all_results)
 
-    # --- 6. Write comparison report ---
-    report_path = write_comparison_report(compare_dir, all_results)
-    console.print(f"\n  Comparison report: [bold green]{report_path}[/bold green]")
-    for key in ("1", "2", "3"):
-        html = all_results.get(key, {}).get("html_path")
-        if html:
-            console.print(f"  Strategy {key} HTML:  [green]{html}[/green]")
+    # --- 6. Show report locations ---
+    console.print(f"\n  [green]Markdown:[/green]  {md_path}")
+    console.print(f"  [green]HTML:[/green]      {html_path}")
     console.print(Rule(style="cyan"))
 
 
