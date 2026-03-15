@@ -77,11 +77,15 @@ class _CopilotTokenCache:
         self._token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
 
-    def get(self, github_token: str) -> Optional[str]:
-        if self._token and self._expires_at:
-            if datetime.now(timezone.utc) < self._expires_at:
-                return self._token
-        return None
+    def valid(self) -> bool:
+        return bool(
+            self._token
+            and self._expires_at
+            and datetime.now(timezone.utc) < self._expires_at
+        )
+
+    def get(self) -> Optional[str]:
+        return self._token if self.valid() else None
 
     def set(self, token: str, expires_at: str) -> None:
         self._token = token
@@ -90,26 +94,20 @@ class _CopilotTokenCache:
                 expires_at.replace("Z", "+00:00")
             )
         except (ValueError, AttributeError):
-            # If expiry can't be parsed, treat token as valid for 25 minutes
             self._expires_at = datetime.fromtimestamp(
                 time.time() + 25 * 60, tz=timezone.utc
             )
 
 
-# One cache per process; keyed by github token to handle token switches
-_copilot_caches: Dict[str, _CopilotTokenCache] = {}
+_copilot_cache = _CopilotTokenCache()
 
 
-def _get_copilot_bearer(github_token: str) -> str:
-    """Exchange a GitHub token for a short-lived Copilot API bearer token.
+def _exchange_token(github_token: str) -> Optional[str]:
+    """Try to exchange *github_token* for a Copilot API token.
 
-    The result is cached in memory until it expires (typically ~30 minutes).
+    Returns the Copilot bearer token string, or None on non-fatal failure
+    (4xx errors).  Raises LLMError only on network/unexpected errors.
     """
-    cache = _copilot_caches.setdefault(github_token, _CopilotTokenCache())
-    cached = cache.get(github_token)
-    if cached:
-        return cached
-
     try:
         resp = requests.post(
             _COPILOT_TOKEN_URL,
@@ -120,24 +118,53 @@ def _get_copilot_bearer(github_token: str) -> str:
             },
             timeout=15,
         )
+        if resp.status_code in (401, 403, 404):
+            return None  # token doesn't have Copilot scope — try next candidate
         resp.raise_for_status()
         data = resp.json()
-    except requests.RequestException as exc:
-        raise LLMError(
-            f"Failed to exchange GitHub token for Copilot API token: {exc}\n"
-            "Make sure you are logged in with 'gh auth login' and have an active "
-            "GitHub Copilot subscription."
-        ) from exc
+        return data.get("token")
+    except requests.RequestException:
+        return None
 
-    token = data.get("token")
-    if not token:
-        raise LLMError(
-            "Copilot token exchange succeeded but returned no token. "
-            f"Response: {data}"
-        )
 
-    cache.set(token, data.get("expires_at", ""))
-    return token
+def _get_copilot_bearer(github_token: str) -> str:
+    """Return a short-lived Copilot API bearer token.
+
+    Token discovery order:
+    1. In-memory cache (reuse until expiry).
+    2. Exchange the VS Code / Copilot credential store token — this token
+       was obtained via the Copilot OAuth app and has the required scope.
+    3. Exchange the supplied *github_token* (works when it has Copilot scope,
+       e.g. a classic PAT created on github.com/settings/tokens).
+
+    Raises LLMError if no exchange succeeds.
+    """
+    cached = _copilot_cache.get()
+    if cached:
+        return cached
+
+    # Prefer the VS Code Copilot store token — it was authorised with the
+    # Copilot OAuth app scope, which is required for the token exchange.
+    vscode_token = _load_token_from_vscode_store()
+    candidates = [t for t in [vscode_token, github_token] if t]
+
+    for candidate in candidates:
+        token = _exchange_token(candidate)
+        if token:
+            _copilot_cache.set(token, "")
+            return token
+
+    raise LLMError(
+        "Could not obtain a Copilot API token.\n"
+        "The token exchange requires Copilot OAuth scope.  Try one of:\n"
+        "  1. Open VS Code with the GitHub Copilot extension installed and\n"
+        "     sign in — this writes a properly-scoped token to\n"
+        "     ~/.config/github-copilot/hosts.json which is used automatically.\n"
+        "  2. Create a classic PAT at https://github.com/settings/tokens\n"
+        "     and set LLM_API_KEY=<pat> in a .env file.\n"
+        "  3. Set LLM_PROVIDER=github_models in .env to use GitHub Models\n"
+        "     instead (separate free-tier quota)."
+    )
 
 
 # ---------------------------------------------------------------------------
