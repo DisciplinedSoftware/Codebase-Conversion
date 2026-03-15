@@ -83,14 +83,6 @@ def run(output_dir: Path) -> None:
     _print_banner()
     console.print(Rule(style="cyan"))
 
-    # Create a timestamped snapshot directory for this run's artifacts.
-    # BLAS sources are fetched/cached at output_dir; everything generated
-    # (Rust crate, reports) lands in run_dir so each run is self-contained.
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = output_dir / f"report_{ts}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    console.print(f"  [dim]Run output: {run_dir}[/dim]")
-
     # --- 1. Library selection -----------------------------------------------
     library = _ask_library()
 
@@ -111,9 +103,19 @@ def run(output_dir: Path) -> None:
     llm = _configure_llm(strategy_key)
 
     # --- 4b. Parallel comparison mode ----------------------------------------
+    # Handled before creating run_dir so no empty report_<date> folder is left
+    # behind when the user picks "all".
     if strategy_key == "all":
         _run_all_parallel_interactive(output_dir, functions_to_convert, source_map)
         return
+
+    # Create the timestamped snapshot directory only for single-strategy runs.
+    # BLAS sources are fetched/cached at output_dir; everything generated
+    # (Rust crate, reports) lands in run_dir so each run is self-contained.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"report_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"  [dim]Run output: {run_dir}[/dim]")
 
     # --- 5. Call graph --------------------------------------------------------
     console.print()
