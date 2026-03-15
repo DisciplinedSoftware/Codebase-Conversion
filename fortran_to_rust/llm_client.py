@@ -103,18 +103,20 @@ _copilot_cache = _CopilotTokenCache()
 
 
 def _exchange_token(github_token: str) -> Optional[str]:
-    """Try to exchange *github_token* for a Copilot API token.
+    """Try to exchange *github_token* for a Copilot API token via GET.
 
     Returns the Copilot bearer token string, or None on non-fatal failure
     (4xx errors).  Raises LLMError only on network/unexpected errors.
     """
     try:
-        resp = requests.post(
+        resp = requests.get(
             _COPILOT_TOKEN_URL,
             headers={
                 "Authorization": f"token {github_token}",
                 "Accept": "application/json",
-                "User-Agent": "fortran-to-rust/1.0",
+                "Editor-Version": "vscode/1.90.0",
+                "Editor-Plugin-Version": "copilot/1.0",
+                "User-Agent": "GithubCopilot/1.0.0",
             },
             timeout=15,
         )
