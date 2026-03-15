@@ -99,13 +99,30 @@ class HybridStrategy(ConversionStrategy):
                         cb(f"[3/hybrid] Polishing with LLM ({self.llm.provider}/{self.llm.model})…")
                         polished = self.llm.polish_unsafe_rust(rust_source, routine.name)
                         if polished.strip():
-                            # Single post-polish check — revert if polish degraded accuracy
+                            # Post-polish accuracy check. If polish introduced errors,
+                            # run the full repair loop on the polished code before
+                            # giving up and reverting to the pre-polish version.
                             post_ok = self._accuracy_check_once(polished, routine)
                             if post_ok is not False:
                                 rust_source = polished
                                 strategy_used += " + LLM polish"
                             else:
-                                cb("  [yellow]LLM polish degraded accuracy — keeping pre-polish version.[/yellow]")
+                                cb(
+                                    "  [yellow]LLM polish introduced accuracy errors — "
+                                    "attempting repair before reverting…[/yellow]"
+                                )
+                                repaired, repaired_strategy, repair_ok = self._accuracy_repair_loop(
+                                    polished, routine, strategy_used + " + LLM polish", cb
+                                )
+                                if repair_ok is not False:
+                                    rust_source = repaired
+                                    strategy_used = repaired_strategy
+                                    acc_passed = repair_ok
+                                else:
+                                    cb(
+                                        "  [yellow]Repair of polished code failed — "
+                                        "keeping pre-polish version.[/yellow]"
+                                    )
                 else:
                     # No f2c output — LLM translates directly from Fortran
                     cb(f"[3/hybrid] Translating with LLM ({self.llm.provider}/{self.llm.model})…")
