@@ -1,21 +1,17 @@
 {
   "name": "Fortran-to-Rust Conversion",
-
   // Build from our Dockerfile so gfortran, f2c, and Rust are pre-installed.
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-
   // Run as the non-root "vscode" user that the base image ships with.
   "remoteUser": "vscode",
-
   // Mount the workspace and carry Cargo's registry cache across rebuilds.
   "mounts": [
     "source=codebase-conversion-cargo-cache,target=/home/vscode/.cargo/registry,type=volume",
     "source=codebase-conversion-cargo-git,target=/home/vscode/.cargo/git,type=volume"
   ],
-
   // After the container is created:
   //   1. Upgrade pip and install the Python package in editable mode.
   //   2. Run the interactive auth-setup script so the user can choose between
@@ -24,7 +20,6 @@
 
   // Keep a copy of the Rust toolchain fresh on every rebuild.
   "postStartCommand": "rustup update stable --no-self-update 2>/dev/null || true",
-
   // VS Code / GitHub Codespaces extensions
   "customizations": {
     "vscode": {
@@ -48,16 +43,16 @@
       }
     }
   },
-
   // Forward no ports by default; add entries here if you add a web UI later.
-  "forwardPorts": [8080],
+  "forwardPorts": [
+    8080
+  ],
   "portsAttributes": {
     "8080": {
       "label": "Report Server",
       "onAutoForward": "notify"
     }
   },
-
   // Environment variables available inside the container.
   // Set LLM_API_KEY via a .env file or a Codespaces secret — never hardcode.
   "containerEnv": {
