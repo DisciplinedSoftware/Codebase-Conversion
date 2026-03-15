@@ -44,8 +44,21 @@ def generate_report(
     reports_dir = output_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Reuse the timestamp embedded in the run directory name (report_YYYYMMDD_HHMMSS)
+    # so the report filenames match the folder name exactly.
+    dir_ts = output_dir.name  # e.g. "report_20260315_030100"
+    if dir_ts.startswith("report_") and len(dir_ts) == len("report_YYYYMMDD_HHMMSS"):
+        ts = dir_ts[len("report_"):]  # "20260315_030100"
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     report_path = reports_dir / f"{ts}_report.md"
+
+    # Human-readable form for the report header
+    try:
+        generated_str = datetime.datetime.strptime(ts, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        generated_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     lines: List[str] = []
     _section = lambda title: lines.extend([f"\n## {title}\n"])
@@ -54,7 +67,7 @@ def generate_report(
     lines.append(f"# Fortran-to-Rust Conversion Report")
     lines.append(f"\n**Library:** {library}  ")
     lines.append(f"**Strategy:** {strategy_name}  ")
-    lines.append(f"**Generated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ")
+    lines.append(f"**Generated:** {generated_str}  ")
     if crate_dir:
         lines.append(f"**Crate:** `{crate_dir}`  ")
 
@@ -160,6 +173,7 @@ def generate_report(
         crate_dir=crate_dir,
         build_ok=build_ok,
         test_ok=test_ok,
+        generated_str=generated_str,
     )
 
     if open_browser:
@@ -264,8 +278,9 @@ def _write_html_report(
     crate_dir: Optional[Path],
     build_ok: bool,
     test_ok: bool,
+    generated_str: Optional[str] = None,
 ) -> Path:
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = generated_str or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def section(title: str) -> str:
         return f"<h2>{_esc(title)}</h2>\n"
