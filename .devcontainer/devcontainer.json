@@ -58,6 +58,6 @@
   // Environment variables available inside the container.
   // Set LLM_API_KEY via a .env file or a Codespaces secret — never hardcode.
   "containerEnv": {
-    "LLM_PROVIDER": "copilot"
+    "LLM_PROVIDER": "github_models"
   }
 }

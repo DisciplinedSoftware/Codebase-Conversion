@@ -9,8 +9,8 @@ Supports:
 Configuration is read from environment variables (and from a ``.env`` file
 in the current working directory, which is loaded automatically):
 
-    LLM_PROVIDER   = "copilot" | "github_models" | "openai" | "openai_compatible"
-                     (default: copilot)
+    LLM_PROVIDER   = "github_models" | "copilot" | "openai" | "openai_compatible"
+                     (default: github_models)
     LLM_API_KEY    = GitHub PAT / OpenAI API key / custom bearer token
     LLM_BASE_URL   = base URL for openai_compatible provider
     LLM_MODEL      = model name override  (default: gpt-4o)
@@ -283,10 +283,11 @@ class LLMClient:
         # Load .env before reading any env vars
         _load_dotenv()
 
-        # Default to "copilot" so Copilot subscribers hit the right endpoint.
-        # "github_models" is kept as an explicit opt-in for the separate
-        # GitHub Models free-tier product (models.inference.ai.azure.com).
-        self.provider = (provider or os.environ.get("LLM_PROVIDER", "copilot")).lower()
+        # Default to "github_models" — accepts the raw GitHub token from
+        # `gh auth token` directly as a Bearer, no token exchange required.
+        # Set LLM_PROVIDER=copilot to use the Copilot endpoint instead (needs
+        # a token with Copilot OAuth scope, e.g. from the VS Code extension).
+        self.provider = (provider or os.environ.get("LLM_PROVIDER", "github_models")).lower()
 
         self.api_key = api_key or _resolve_api_key(self.provider)
         self.model = model or os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
