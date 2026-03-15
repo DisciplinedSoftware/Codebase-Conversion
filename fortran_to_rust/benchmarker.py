@@ -175,6 +175,7 @@ _RUST_BENCH_TEMPLATE = """\
 // Auto-generated benchmark binary for `{fn_name}`
 #![allow(unused_mut, unused_variables, dead_code)]
 use std::time::Instant;
+use {crate_name}::*;
 
 fn main() {{
     const REPS: usize = {reps};
@@ -182,8 +183,7 @@ fn main() {{
 
     let start = Instant::now();
     for _ in 0..REPS {{
-        // {fn_lower}({call_args});  // uncomment once the Rust signature is known
-        std::hint::black_box(&{first_array});
+        unsafe {{ std::hint::black_box({fn_lower}({call_args})); }}
     }}
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0 / REPS as f64;
     println!("{{:.6}}", elapsed_ms);
@@ -205,7 +205,6 @@ def _generate_rust_bench(
 
     inputs: List[str] = []
     call_args: List[str] = []
-    first_array = "0_f64"
 
     for name in arg_names:
         decl = arg_decls.get(name.upper(), ArgDecl(name=name.upper(), ftype="DOUBLE PRECISION", dims=[]))
@@ -226,7 +225,6 @@ def _generate_rust_bench(
                 total *= s
             inputs.append(f"    let mut {rname} = vec![0.5_f64; {total}];")
             call_args.append(f"&mut {rname}")
-            first_array = rname
         elif decl.is_logical:
             inputs.append(f"    let {rname}: bool = false;")
             call_args.append(rname)
@@ -234,13 +232,14 @@ def _generate_rust_bench(
             inputs.append(f"    let mut {rname}: f64 = 0.0;")
             call_args.append(f"&mut {rname}")
 
+    crate_name = crate_dir.name
     rust_src = _RUST_BENCH_TEMPLATE.format(
         fn_name=routine_name,
         fn_lower=fn_lower,
+        crate_name=crate_name,
         reps=reps,
         rust_inputs="\n".join(inputs),
         call_args=", ".join(call_args),
-        first_array=first_array,
     )
     (examples_dir / f"bench_{fn_lower}.rs").write_text(rust_src)
     return True
