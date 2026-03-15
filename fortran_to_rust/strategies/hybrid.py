@@ -79,20 +79,36 @@ class HybridStrategy(ConversionStrategy):
             rust_source = self._direct_fortran_to_rust(routine)
             strategy_used = "direct rule-based"
 
-        # Optional LLM polish
+        # Optional LLM step
         if self.llm.is_available:
-            cb(f"[3/hybrid] Polishing with LLM ({self.llm.provider}/{self.llm.model})…")
             try:
-                polished = self.llm.polish_unsafe_rust(rust_source, routine.name)
-                if polished.strip():
-                    rust_source = polished
-                    strategy_used += " + LLM polish"
+                if c_source:
+                    # f2c produced C — polish the resulting unsafe Rust skeleton
+                    cb(f"[3/hybrid] Polishing with LLM ({self.llm.provider}/{self.llm.model})…")
+                    polished = self.llm.polish_unsafe_rust(rust_source, routine.name)
+                    if polished.strip():
+                        rust_source = polished
+                        strategy_used += " + LLM polish"
+                else:
+                    # No f2c output — translate directly from Fortran for correct array layout
+                    cb(f"[3/hybrid] Translating with LLM ({self.llm.provider}/{self.llm.model})…")
+                    translated = self.llm.translate_fortran_to_rust(
+                        routine.source, routine.name
+                    )
+                    if translated.strip():
+                        rust_source = translated
+                        strategy_used = "LLM translation"
             except LLMUnavailableError:
                 pass
             except Exception as exc:
-                cb(f"  [yellow]LLM polish skipped: {exc}[/yellow]")
+                cb(f"  [yellow]LLM step skipped: {exc}[/yellow]")
+
+            # Accuracy-gated retry: compile + quick numerical check, repair if wrong
+            rust_source, strategy_used = self._accuracy_repair_loop(
+                rust_source, routine, strategy_used, cb
+            )
         else:
-            cb("  [dim]LLM not configured — skipping polish step.[/dim]")
+            cb("  [dim]LLM not configured — skipping LLM step.[/dim]")
 
         result = ConversionResult(
             routine_name=routine.name,
@@ -101,6 +117,70 @@ class HybridStrategy(ConversionStrategy):
             strategy_used=strategy_used,
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Accuracy-gated repair loop
+    # ------------------------------------------------------------------
+
+    _MAX_ACCURACY_RETRIES = 2
+    _ACCURACY_TOLERANCE = 1e-6  # tighter than test_harness default for early bail-out
+
+    def _accuracy_repair_loop(
+        self,
+        rust_source: str,
+        routine: FortranRoutine,
+        strategy_used: str,
+        cb,
+    ):
+        """Build a temp crate, run a single accuracy test, retry with LLM repair if wrong.
+
+        Returns (rust_source, strategy_used).
+        """
+        from fortran_to_rust.rust_project import build_crate, scaffold_crate
+        from fortran_to_rust.test_harness import run_accuracy_check
+
+        # Find the cached Fortran source file (fetched by the pipeline earlier)
+        fortran_path = (
+            self.output_dir / "fortran" / "blas" / f"{routine.name.lower()}.f"
+        )
+        if not fortran_path.exists():
+            return rust_source, strategy_used
+
+        for attempt in range(self._MAX_ACCURACY_RETRIES):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                crate_dir = scaffold_crate(tmp, "acc_check", {routine.name: rust_source})
+                build_ok, _ = build_crate(crate_dir)
+                if not build_ok:
+                    return rust_source, strategy_used  # compile errors handled elsewhere
+
+                acc = run_accuracy_check(
+                    routine.name,
+                    fortran_path,
+                    crate_dir,
+                    routine=routine,
+                    num_tests=1,
+                )
+
+            if acc.max_abs_error is None or acc.max_abs_error <= self._ACCURACY_TOLERANCE:
+                return rust_source, strategy_used  # passed or no comparison possible
+
+            cb(
+                f"  [yellow]Accuracy check failed (max_err={acc.max_abs_error:.2e}), "
+                f"repairing translation (attempt {attempt + 1}/{self._MAX_ACCURACY_RETRIES})…[/yellow]"
+            )
+            try:
+                repaired = self.llm.repair_accuracy(
+                    rust_source, routine.source, routine.name, acc.max_abs_error
+                )
+                if repaired.strip():
+                    rust_source = repaired
+                    strategy_used += f" + accuracy-repair×{attempt + 1}"
+            except Exception as exc:
+                cb(f"  [yellow]Accuracy repair skipped: {exc}[/yellow]")
+                return rust_source, strategy_used
+
+        return rust_source, strategy_used
 
     # ------------------------------------------------------------------
     # f2c step
