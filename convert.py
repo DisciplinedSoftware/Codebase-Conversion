@@ -139,6 +139,39 @@ def _make_progress_callback(fn_name: str, messages: list[str], console):  # type
     return cb
 
 
+def _make_stream_cb(fn_name: str, console):  # type: ignore[type-arg]
+    """Return a stream callback that writes LLM tokens to the console live.
+
+    Prints a header on first token and a trailing newline when the stream ends
+    via a simple stateful closure.
+    """
+    import sys
+    state = {"started": False}
+
+    def cb(chunk: str) -> None:
+        if not state["started"]:
+            console.print(f"  [{fn_name}] [dim]LLM output ↓[/dim]")
+            state["started"] = True
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+
+    return cb, state
+
+
+def _run_with_spinner(label: str, console, fn, *args, **kwargs):  # type: ignore[type-arg]
+    """Run *fn(*args, **kwargs)* with a transient Rich spinner showing *label*."""
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"  [dim]{label}…[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("")
+        return fn(*args, **kwargs)
+
+
 def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str) -> None:
     """Headless pipeline: convert the requested functions and produce a report."""
     from rich.console import Console
@@ -205,7 +238,8 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     # --- 4. Convert ---
     console.print(f"\n[bold]Converting with strategy {strategy_key}…[/bold]")
     StrategyClass = STRATEGY_MAP[strategy_key]
-    llm = LLMClient()
+    stream_cb, stream_state = _make_stream_cb("stream", console)
+    llm = LLMClient(stream_callback=stream_cb)
     strategy = StrategyClass(output_dir, llm=llm)
 
     conversion_results = []
@@ -216,9 +250,13 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
             continue
 
         messages: list[str] = []
+        stream_cb, stream_state = _make_stream_cb(fn, console)
+        llm.stream_callback = stream_cb
         cb = _make_progress_callback(fn, messages, console)
 
         result = strategy.convert(routine, progress_callback=cb)
+        if stream_state["started"]:
+            console.print()  # newline after streamed output
         conversion_results.append(result)
         status = "[green]✓[/green]" if result.success else "[red]✗[/red]"
         console.print(f"  {status} {fn} — {result.strategy_used}")
@@ -234,10 +272,10 @@ def _run_non_interactive(output_dir: Path, functions_arg: str, strategy_key: str
     crate_dir = scaffold_crate(run_dir, crate_name, rust_sources)
     console.print(f"  Crate: {crate_dir}")
 
-    build_ok, build_out = build_crate(crate_dir)
+    build_ok, build_out = _run_with_spinner("cargo build --release", console, build_crate, crate_dir)
     console.print(f"  cargo build: {'✅ passed' if build_ok else '⚠ finished with errors'}")
 
-    test_ok, test_out = test_crate(crate_dir)
+    test_ok, test_out = _run_with_spinner("cargo test", console, test_crate, crate_dir)
     console.print(f"  cargo test:  {'✅ passed' if test_ok else '⚠ finished with errors'}")
 
     # --- 6. Accuracy ---
