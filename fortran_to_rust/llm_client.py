@@ -31,7 +31,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
@@ -162,6 +162,7 @@ class LLMClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         # Load .env before reading any env vars
         _load_dotenv()
@@ -175,6 +176,10 @@ class LLMClient:
         self.api_key = api_key or _resolve_api_key(self.provider)
         self.model = model or os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
         self.base_url = base_url or os.environ.get("LLM_BASE_URL") or self._default_url()
+
+        # Optional callback receiving each streamed text chunk as it arrives.
+        # When set, chat() uses SSE streaming so the caller sees output live.
+        self.stream_callback = stream_callback
 
     def _default_url(self) -> str:
         if self.provider == "openai":
@@ -207,6 +212,10 @@ class LLMClient:
     ) -> str:
         """Send a chat-completions request and return the assistant reply text.
 
+        When ``self.stream_callback`` is set the request uses SSE streaming:
+        each text chunk is passed to the callback as it arrives, so the caller
+        can display output live instead of waiting for the full response.
+
         Raises LLMUnavailableError if no key is configured.
         Raises LLMError on API failure after *retry* attempts.
         """
@@ -223,11 +232,13 @@ class LLMClient:
                 "     a local model server (e.g. Ollama, LM Studio)."
             )
 
+        streaming = self.stream_callback is not None
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "stream": streaming,
         }
 
         last_exc: Optional[Exception] = None
@@ -238,12 +249,16 @@ class LLMClient:
                     headers=self._headers(),
                     json=payload,
                     timeout=_REQUEST_TIMEOUT,
+                    stream=streaming,
                 )
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", "5"))
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
+
+                if streaming:
+                    return self._consume_stream(resp)
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
             except (requests.RequestException, KeyError, ValueError) as exc:
@@ -252,6 +267,32 @@ class LLMClient:
                     time.sleep(2 ** attempt)
 
         raise LLMError(f"LLM request failed after {retry + 1} attempts: {last_exc}") from last_exc
+
+    def _consume_stream(self, resp: "requests.Response") -> str:
+        """Parse an SSE streaming response, calling ``stream_callback`` per chunk.
+
+        Returns the full concatenated text when the stream ends.
+        """
+        chunks: List[str] = []
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                delta = json.loads(data)
+                content = delta["choices"][0]["delta"].get("content")
+                if content:
+                    chunks.append(content)
+                    if self.stream_callback:
+                        self.stream_callback(content)
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
+        return "".join(chunks)
 
     @staticmethod
     def _strip_code_fence(text: str) -> str:

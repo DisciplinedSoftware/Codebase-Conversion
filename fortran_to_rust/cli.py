@@ -124,8 +124,10 @@ def run(output_dir: Path) -> None:
         console.print()
         console.print(f"  [bold cyan]Converting:[/bold cyan] {fn_name}  "
                       f"[dim]({routine.line_count} lines)[/dim]")
+        console.print(f"  [dim]LLM output ↓[/dim]")
 
         result = strategy.convert(routine, progress_callback=_make_cb())
+        console.print()  # newline after streamed output
         conversion_results.append(result)
 
         if result.success:
@@ -312,7 +314,7 @@ def _ask_strategy() -> str:
 
 
 def _configure_llm(strategy_key: str) -> LLMClient:
-    llm = LLMClient()
+    llm = LLMClient(stream_callback=_make_stream_cb())
     if llm.is_available:
         console.print(
             f"\n  [green]✓[/green] LLM configured: "
@@ -325,6 +327,7 @@ def _configure_llm(strategy_key: str) -> LLMClient:
 
     configured = prompt_auth_setup(console)
     if configured is not None and configured.is_available:
+        configured.stream_callback = _make_stream_cb()
         return configured
 
     # Still no auth after setup (user skipped or setup failed)
@@ -338,6 +341,15 @@ def _configure_llm(strategy_key: str) -> LLMClient:
             "\n  [dim]No LLM available — Strategy 3 will use rule-based conversion only.[/dim]"
         )
     return llm
+
+
+def _make_stream_cb():
+    """Return a stream callback that writes LLM output chunks to the console live."""
+    import sys
+    def cb(chunk: str) -> None:
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+    return cb
 
 
 def _make_cb():
