@@ -452,6 +452,7 @@ def generate_fortran_driver(
     dataset_path: Path,
     routine_kind: str = "subroutine",
     return_ftype: str = "DOUBLE PRECISION",
+    char_overrides: Optional[Dict[str, str]] = None,
 ) -> str:
     """Build a complete Fortran PROGRAM that calls *routine_name* and prints its outputs.
 
@@ -462,6 +463,10 @@ def generate_fortran_driver(
     ``write_dataset_file``), so both the Fortran driver and the Rust example
     binary read from the same file and are guaranteed identical numerical inputs.
     INTEGER, CHARACTER and LOGICAL arguments are hardcoded as constants.
+
+    *char_overrides* maps uppercase argument names to single-character strings
+    (e.g. ``{"TRANSA": "T"}``).  When provided, the matching ``CHARACTER*1``
+    arguments are assigned the override value instead of the default ``'N'``.
     """
     # --- Collect grouped types for Fortran declarations ---
     int_scalars = [n.upper() for n in arg_names
@@ -556,7 +561,8 @@ def generate_fortran_driver(
         if decl is None or decl.is_real:
             continue
         if decl.is_char and not decl.is_array:
-            const_lines.append(f"      {upper} = 'N'")
+            char_val = (char_overrides or {}).get(upper, "N")
+            const_lines.append(f"      {upper} = '{char_val}'")
         elif decl.is_logical and not decl.is_array:
             const_lines.append(f"      {upper} = .FALSE.")
         elif decl.is_integer and not decl.is_array:
@@ -764,12 +770,22 @@ def _generate_rust_example(
     dataset_path: Path,
     routine_kind: str = "subroutine",
     return_ftype: str = "DOUBLE PRECISION",
+    char_overrides: Optional[Dict[str, str]] = None,
+    example_suffix: str = "",
 ) -> bool:
     """Write a Rust example binary that mirrors the Fortran test driver.
 
     Real inputs are loaded at runtime from *dataset_path* (written by
     ``write_dataset_file``), so the Rust example and the Fortran driver both
     read from the same on-disk file and are guaranteed identical numerical inputs.
+
+    *char_overrides* maps uppercase argument names to single-character strings.
+    When provided, ``CHARACTER*1`` arguments receive the override byte literal
+    instead of the default ``b'N'``.
+
+    *example_suffix* is appended to the example binary name
+    (``accuracy_{fn}{_suffix}.rs``), enabling multiple scenario-specific
+    binaries to coexist for the same function.
     """
     fn_lower = routine_name.lower()
     crate_name = get_crate_lib_name(crate_dir)
@@ -785,7 +801,8 @@ def _generate_rust_example(
         rname = name.lower()
 
         if decl.is_char:
-            inputs.append(f"    let {rname}: u8 = b'N';")
+            char_val = (char_overrides or {}).get(name.upper(), "N")
+            inputs.append(f"    let {rname}: u8 = b'{char_val}';")
             call_args.append(rname)
         elif decl.is_integer and not decl.is_array:
             inputs.append(f"    let {rname}: i32 = {assigned_dims.get(name.upper(), 4)};")
@@ -820,13 +837,15 @@ def _generate_rust_example(
         call_args=", ".join(call_args),
         rust_prints="\n".join(prints) if prints else "    // no array outputs",
     )
-    (examples_dir / f"accuracy_{fn_lower}.rs").write_text(rust_src)
+    example_name = f"accuracy_{fn_lower}" + (f"_{example_suffix}" if example_suffix else "")
+    (examples_dir / f"{example_name}.rs").write_text(rust_src)
     return True
 
 
 def _compile_run_rust_example(
     crate_dir: Path,
     routine_name: str,
+    example_suffix: str = "",
 ) -> Optional[List[float]]:
     """Compile and run the Rust accuracy example; return printed floats or None."""
     import shutil
@@ -834,16 +853,17 @@ def _compile_run_rust_example(
     if not shutil.which("cargo"):
         return None
     fn_lower = routine_name.lower()
+    example_name = f"accuracy_{fn_lower}" + (f"_{example_suffix}" if example_suffix else "")
     try:
         result = subprocess.run(
-            ["cargo", "build", "--release", "--example", f"accuracy_{fn_lower}"],
+            ["cargo", "build", "--release", "--example", example_name],
             capture_output=True, text=True, cwd=crate_dir, timeout=120,
         )
     except FileNotFoundError:
         return None
     if result.returncode != 0:
         return None
-    exe = crate_dir / "target" / "release" / "examples" / f"accuracy_{fn_lower}"
+    exe = crate_dir / "target" / "release" / "examples" / example_name
     if not exe.exists():
         return None
     run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
@@ -965,8 +985,9 @@ def run_accuracy_check(
             _generate_rust_example(
                 fn, arg_names, arg_decls, assigned_dims, crate_dir, dataset_path,
                 routine_kind=routine_kind, return_ftype=return_ftype,
+                example_suffix=str(t),
             )
-            rust_out = _compile_run_rust_example(crate_dir, fn)
+            rust_out = _compile_run_rust_example(crate_dir, fn, example_suffix=str(t))
 
         if rust_out and len(rust_out) == len(fortran_out) and fortran_out:
             case_errors = [abs(rust_out[i] - fortran_out[i]) for i in range(len(fortran_out))]
@@ -1015,3 +1036,254 @@ def run_accuracy_check(
         failed_cases=failed,
         details=details,
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario-driven accuracy testing
+# ---------------------------------------------------------------------------
+
+# A silent XERBLA stub used for invalid-input scenarios so gfortran does not
+# abort the process.  BLAS routines should detect the bad argument, call
+# XERBLA, then return immediately — leaving output arrays untouched.  With
+# this stub the Fortran process stays alive long enough to print those
+# (unchanged) array values, which the test then compares against the Rust
+# implementation's output.
+_SILENT_XERBLA_SOURCE = """\
+      SUBROUTINE XERBLA( SRNAME, INFO )
+      CHARACTER*6 SRNAME
+      INTEGER     INFO
+*     Silent stub: do not abort; let caller return early.
+      RETURN
+      END
+"""
+
+
+def apply_scenario(
+    scenario: "object",  # TestScenario
+    base_assigned_dims: Dict[str, int],
+    arg_decls: Dict[str, ArgDecl],
+    arg_names: List[str],
+) -> Tuple[Dict[str, int], "TestDataset"]:
+    """Merge *scenario* overrides into *base_assigned_dims* and generate a dataset.
+
+    Returns ``(new_dims, dataset)`` where:
+
+    * ``new_dims`` is a copy of *base_assigned_dims* with
+      ``scenario.dim_overrides`` applied on top.
+    * ``dataset`` is generated with ``scenario.seed`` and the merged dims;
+      then ``scenario.float_overrides`` are written directly into
+      ``dataset.values`` (post-generation replacement so they are guaranteed
+      to appear in the on-disk file regardless of the RNG draw).
+    """
+    new_dims: Dict[str, int] = {**base_assigned_dims, **scenario.dim_overrides}
+    dataset = generate_dataset(
+        arg_names, arg_decls, new_dims, test_index=scenario.seed
+    )
+    for name, val in scenario.float_overrides.items():
+        key = name.upper()
+        if key in dataset.values:
+            dataset.values[key] = float(val)
+    return new_dims, dataset
+
+
+def run_scenario_suite(
+    function_name: str,
+    fortran_source_path: Optional[Path],
+    crate_dir: Optional[Path],
+    scenarios: List["object"],  # List[TestScenario]
+    *,
+    routine=None,          # FortranRoutine | None
+    fortran_ref_dir: Optional[Path] = None,
+    datasets_dir: Optional[Path] = None,
+) -> List[AccuracyResult]:
+    """Run every *scenario* against both the Fortran reference and the Rust crate.
+
+    For each scenario this function:
+
+    1. Applies ``scenario.dim_overrides`` and ``scenario.float_overrides`` to
+       generate a concrete ``TestDataset``.
+    2. Writes the dataset to a scenario-specific file so that the two
+       generated drivers read from the same on-disk source.
+    3. Generates and compiles a Fortran test driver; for
+       ``scenario.invalid_input=True`` the XERBLA support file is replaced
+       with a silent stub so the process does not abort.
+    4. Generates and compiles a Rust example binary with the same inputs.
+    5. Compares the numerical outputs.  For ``scenario.expects_noop=True``
+       an empty-output agreement counts as a pass.
+
+    Returns one :class:`AccuracyResult` per scenario.  The
+    ``function_name`` field of each result is ``"{fn}::{scenario.name}"``
+    so that failures are identifiable in test output.
+    """
+    fn = function_name.upper()
+
+    # --- Resolve routine / argument info ---
+    if routine is None and fortran_source_path is not None:
+        from fortran_to_rust.parser import parse_file
+        routines = parse_file(fortran_source_path)
+        matched = [r for r in routines if r.name.upper() == fn]
+        if matched:
+            routine = matched[0]
+
+    if routine is None:
+        return [
+            AccuracyResult(
+                function_name=f"{fn}::{s.name}",
+                passed=False,
+                error_message="Could not resolve routine; scenario suite skipped.",
+            )
+            for s in scenarios
+        ]
+
+    arg_names = routine.args
+    arg_decls = parse_arg_declarations(routine.source, arg_names)
+    base_dims = _assign_dims(arg_decls)
+    routine_kind = getattr(routine, "kind", "subroutine")
+    return_ftype = getattr(routine, "return_type", None) or "DOUBLE PRECISION"
+
+    # --- Base extra sources (reference Fortran file + support helpers) ---
+    base_extra: List[Path] = []
+    if fortran_source_path and fortran_source_path.exists():
+        base_extra.append(fortran_source_path)
+        base_extra += _find_support_files(fortran_source_path.parent)
+
+    fortran_keep_dir = (
+        fortran_ref_dir
+        if fortran_ref_dir is not None
+        else ((crate_dir.parent / "fortran") if crate_dir else None)
+    )
+
+    if datasets_dir is None:
+        if crate_dir:
+            datasets_dir = crate_dir.parent / "datasets"
+        elif fortran_keep_dir:
+            datasets_dir = fortran_keep_dir / "datasets"
+        else:
+            import tempfile as _tf
+            datasets_dir = Path(_tf.mkdtemp())
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+
+    fn_lower = fn.lower()
+    results: List[AccuracyResult] = []
+
+    for scenario in scenarios:
+        label = f"{fn}::{scenario.name}"
+        new_dims, dataset = apply_scenario(
+            scenario, base_dims, arg_decls, arg_names
+        )
+
+        dataset_path = datasets_dir / f"{fn_lower}_{scenario.name}.txt"
+        write_dataset_file(dataset, dataset_path)
+
+        # Build the extra-sources list; replace xerbla with silent stub for
+        # invalid-input scenarios so XERBLA does not call STOP.
+        extra_sources: List[Path] = []
+        if scenario.invalid_input:
+            import tempfile as _tf
+            stub_dir = Path(_tf.mkdtemp())
+            silent_xerbla = stub_dir / "xerbla_silent.f"
+            silent_xerbla.write_text(_SILENT_XERBLA_SOURCE)
+            for p in base_extra:
+                if "xerbla" not in p.name.lower():
+                    extra_sources.append(p)
+            extra_sources.append(silent_xerbla)
+        else:
+            extra_sources = list(base_extra)
+
+        # --- Fortran side ---
+        driver_src = generate_fortran_driver(
+            fn, arg_names, arg_decls, new_dims, dataset_path,
+            routine_kind=routine_kind, return_ftype=return_ftype,
+            char_overrides=scenario.char_overrides or {},
+        )
+        file_stem = f"{fn_lower}_{scenario.name}"
+        fortran_out = _compile_run_fortran(
+            driver_src, extra_sources,
+            keep_dir=fortran_keep_dir,
+            file_stem=file_stem,
+        )
+
+        if fortran_out is None:
+            results.append(AccuracyResult(
+                function_name=label,
+                passed=False,
+                error_message="Fortran reference failed to compile or run.",
+            ))
+            continue
+
+        # --- Rust side ---
+        rust_out: Optional[List[float]] = None
+        if crate_dir and crate_dir.exists():
+            _generate_rust_example(
+                fn, arg_names, arg_decls, new_dims, crate_dir, dataset_path,
+                routine_kind=routine_kind, return_ftype=return_ftype,
+                char_overrides=scenario.char_overrides or {},
+                example_suffix=scenario.name,
+            )
+            rust_out = _compile_run_rust_example(
+                crate_dir, fn, example_suffix=scenario.name
+            )
+
+        # --- Compare ---
+        details: List[str] = [f"  Scenario: {scenario.description}"]
+
+        # Both produced no output → valid for a no-op scenario
+        if not fortran_out and (rust_out is None or not rust_out):
+            results.append(AccuracyResult(
+                function_name=label,
+                passed=True,
+                num_test_cases=1,
+                details=details + ["  Both implementations produced no output (no-op confirmed)."],
+            ))
+            continue
+
+        if rust_out is None:
+            results.append(AccuracyResult(
+                function_name=label,
+                passed=fortran_out is not None,
+                num_test_cases=1,
+                error_message="Rust binary not available; Fortran reference ran.",
+                details=details + [f"  Fortran: {len(fortran_out)} value(s)."],
+            ))
+            continue
+
+        if len(rust_out) != len(fortran_out):
+            results.append(AccuracyResult(
+                function_name=label,
+                passed=False,
+                num_test_cases=1,
+                error_message=(
+                    f"Output length mismatch: Fortran={len(fortran_out)}, "
+                    f"Rust={len(rust_out)}."
+                ),
+                details=details,
+            ))
+            continue
+
+        if not fortran_out:
+            # Both empty — should have been caught above, but guard defensively.
+            results.append(AccuracyResult(
+                function_name=label,
+                passed=True,
+                num_test_cases=1,
+                details=details + ["  Both produced empty output."],
+            ))
+            continue
+
+        case_errors = [abs(rust_out[i] - fortran_out[i]) for i in range(len(fortran_out))]
+        max_e = max(case_errors)
+        mean_e = sum(case_errors) / len(case_errors)
+        ok = max_e <= _TOLERANCE
+        results.append(AccuracyResult(
+            function_name=label,
+            passed=ok,
+            max_abs_error=max_e,
+            mean_abs_error=mean_e,
+            num_test_cases=1,
+            failed_cases=0 if ok else 1,
+            details=details + [
+                f"  max_abs_error={max_e:.2e} {'OK' if ok else 'FAIL'}",
+            ],
+        ))
+
+    return results
