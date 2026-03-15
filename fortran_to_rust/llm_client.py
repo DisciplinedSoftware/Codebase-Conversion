@@ -1,27 +1,31 @@
 """LLM API client.
 
 Supports:
-  - GitHub Models  (https://models.inference.ai.azure.com — default)
-  - OpenAI         (https://api.openai.com/v1/chat/completions)
+  - GitHub Copilot  (https://api.githubcopilot.com — default, for Copilot subscribers)
+  - GitHub Models   (https://models.inference.ai.azure.com — free tier, separate product)
+  - OpenAI          (https://api.openai.com/v1/chat/completions)
   - Any OpenAI-compatible endpoint (e.g. Ollama, LM Studio)
 
 Configuration is read from environment variables (and from a ``.env`` file
 in the current working directory, which is loaded automatically):
 
-    LLM_PROVIDER   = "github_models" | "openai" | "openai_compatible"  (default: github_models)
+    LLM_PROVIDER   = "copilot" | "github_models" | "openai" | "openai_compatible"
+                     (default: copilot)
     LLM_API_KEY    = GitHub PAT / OpenAI API key / custom bearer token
     LLM_BASE_URL   = base URL for openai_compatible provider
     LLM_MODEL      = model name override  (default: gpt-4o)
 
-GitHub Models authentication is resolved in this order:
-1. ``LLM_API_KEY`` environment variable (or ``.env`` file in the project root).
-2. ``gh auth token`` — the GitHub CLI token (works after ``gh auth login``).
-3. ``~/.config/github-copilot/hosts.json`` — VS Code / Copilot credential store.
+GitHub Copilot provider (recommended for Copilot subscribers):
+  Uses ``https://api.githubcopilot.com/chat/completions``.  Automatically
+  exchanges your GitHub token for a short-lived Copilot API token.  Token
+  discovery order:
+    1. ``LLM_API_KEY`` env / ``.env`` file.
+    2. ``gh auth token`` — the GitHub CLI token (works after ``gh auth login``).
+    3. ``~/.config/github-copilot/hosts.json`` — VS Code / Copilot credential store.
 
-GitHub Models (``https://models.inference.ai.azure.com``) is the supported
-public API for application code.  It accepts a raw GitHub Personal Access
-Token or the OAuth token obtained via ``gh auth login`` — no token exchange
-or Copilot subscription is required.
+GitHub Models provider:
+  Uses ``https://models.inference.ai.azure.com``.  Separate free-tier product
+  with its own rate limits — not linked to a Copilot subscription.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -38,6 +43,8 @@ import requests
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+_COPILOT_ENDPOINT = "https://api.githubcopilot.com/chat/completions"
+_COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 _GITHUB_MODELS_ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
 _OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 _DEFAULT_MODEL = "gpt-4o"
@@ -57,6 +64,80 @@ class LLMError(Exception):
 
 class LLMUnavailableError(LLMError):
     """Raised when no API key / token is configured."""
+
+
+# ---------------------------------------------------------------------------
+# Copilot token exchange (GitHub token → short-lived Copilot API token)
+# ---------------------------------------------------------------------------
+
+class _CopilotTokenCache:
+    """In-memory cache for a single short-lived Copilot API token."""
+
+    def __init__(self) -> None:
+        self._token: Optional[str] = None
+        self._expires_at: Optional[datetime] = None
+
+    def get(self, github_token: str) -> Optional[str]:
+        if self._token and self._expires_at:
+            if datetime.now(timezone.utc) < self._expires_at:
+                return self._token
+        return None
+
+    def set(self, token: str, expires_at: str) -> None:
+        self._token = token
+        try:
+            self._expires_at = datetime.fromisoformat(
+                expires_at.replace("Z", "+00:00")
+            )
+        except (ValueError, AttributeError):
+            # If expiry can't be parsed, treat token as valid for 25 minutes
+            self._expires_at = datetime.fromtimestamp(
+                time.time() + 25 * 60, tz=timezone.utc
+            )
+
+
+# One cache per process; keyed by github token to handle token switches
+_copilot_caches: Dict[str, _CopilotTokenCache] = {}
+
+
+def _get_copilot_bearer(github_token: str) -> str:
+    """Exchange a GitHub token for a short-lived Copilot API bearer token.
+
+    The result is cached in memory until it expires (typically ~30 minutes).
+    """
+    cache = _copilot_caches.setdefault(github_token, _CopilotTokenCache())
+    cached = cache.get(github_token)
+    if cached:
+        return cached
+
+    try:
+        resp = requests.post(
+            _COPILOT_TOKEN_URL,
+            headers={
+                "Authorization": f"token {github_token}",
+                "Accept": "application/json",
+                "User-Agent": "fortran-to-rust/1.0",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        raise LLMError(
+            f"Failed to exchange GitHub token for Copilot API token: {exc}\n"
+            "Make sure you are logged in with 'gh auth login' and have an active "
+            "GitHub Copilot subscription."
+        ) from exc
+
+    token = data.get("token")
+    if not token:
+        raise LLMError(
+            "Copilot token exchange succeeded but returned no token. "
+            f"Response: {data}"
+        )
+
+    cache.set(token, data.get("expires_at", ""))
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +224,8 @@ def _resolve_api_key(provider: str) -> Optional[str]:
     key = os.environ.get("LLM_API_KEY")
     if key:
         return key
-    # 2. GitHub CLI (relevant for github_models and the legacy "copilot" alias)
-    if provider in ("github_models", "copilot"):
+    # 2. GitHub CLI — relevant for copilot and github_models
+    if provider in ("copilot", "github_models"):
         key = _load_token_from_gh_cli()
         if key:
             return key
@@ -173,11 +254,10 @@ class LLMClient:
         # Load .env before reading any env vars
         _load_dotenv()
 
-        raw_provider = (provider or os.environ.get("LLM_PROVIDER", "github_models")).lower()
-        # "copilot" is kept as a backward-compatible alias for "github_models":
-        # both providers authenticate with a GitHub token and use the same
-        # GitHub Models API endpoint, so there is no functional difference.
-        self.provider = "github_models" if raw_provider == "copilot" else raw_provider
+        # Default to "copilot" so Copilot subscribers hit the right endpoint.
+        # "github_models" is kept as an explicit opt-in for the separate
+        # GitHub Models free-tier product (models.inference.ai.azure.com).
+        self.provider = (provider or os.environ.get("LLM_PROVIDER", "copilot")).lower()
 
         self.api_key = api_key or _resolve_api_key(self.provider)
         self.model = model or os.environ.get("LLM_MODEL") or _DEFAULT_MODEL
@@ -188,6 +268,8 @@ class LLMClient:
         self.stream_callback = stream_callback
 
     def _default_url(self) -> str:
+        if self.provider == "copilot":
+            return _COPILOT_ENDPOINT
         if self.provider == "openai":
             return _OPENAI_ENDPOINT
         if self.provider == "openai_compatible":
@@ -205,7 +287,14 @@ class LLMClient:
             "Accept": "application/json",
         }
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            if self.provider == "copilot":
+                # Exchange GitHub token for short-lived Copilot bearer token
+                bearer = _get_copilot_bearer(self.api_key)
+                headers["Authorization"] = f"Bearer {bearer}"
+                headers["Editor-Version"] = "vscode/1.90.0"
+                headers["Copilot-Integration-Id"] = "vscode-chat"
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
     def chat(
