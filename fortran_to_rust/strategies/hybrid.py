@@ -79,20 +79,31 @@ class HybridStrategy(ConversionStrategy):
             rust_source = self._direct_fortran_to_rust(routine)
             strategy_used = "direct rule-based"
 
-        # Optional LLM polish
+        # Optional LLM step
         if self.llm.is_available:
-            cb(f"[3/hybrid] Polishing with LLM ({self.llm.provider}/{self.llm.model})…")
             try:
-                polished = self.llm.polish_unsafe_rust(rust_source, routine.name)
-                if polished.strip():
-                    rust_source = polished
-                    strategy_used += " + LLM polish"
+                if c_source:
+                    # f2c produced C — polish the resulting unsafe Rust skeleton
+                    cb(f"[3/hybrid] Polishing with LLM ({self.llm.provider}/{self.llm.model})…")
+                    polished = self.llm.polish_unsafe_rust(rust_source, routine.name)
+                    if polished.strip():
+                        rust_source = polished
+                        strategy_used += " + LLM polish"
+                else:
+                    # No f2c output — translate directly from Fortran for correct array layout
+                    cb(f"[3/hybrid] Translating with LLM ({self.llm.provider}/{self.llm.model})…")
+                    translated = self.llm.translate_fortran_to_rust(
+                        routine.source, routine.name
+                    )
+                    if translated.strip():
+                        rust_source = translated
+                        strategy_used = "LLM translation"
             except LLMUnavailableError:
                 pass
             except Exception as exc:
-                cb(f"  [yellow]LLM polish skipped: {exc}[/yellow]")
+                cb(f"  [yellow]LLM step skipped: {exc}[/yellow]")
         else:
-            cb("  [dim]LLM not configured — skipping polish step.[/dim]")
+            cb("  [dim]LLM not configured — skipping LLM step.[/dim]")
 
         result = ConversionResult(
             routine_name=routine.name,

@@ -280,8 +280,10 @@ class LLMClient:
             f"`pub unsafe fn {fn_lower}(...)` — do NOT wrap it inside any `mod` block. "
             "Use f64 for DOUBLE PRECISION, i32 for INTEGER, bool for LOGICAL, "
             "u8 for CHARACTER*1 (pass ASCII byte literals like b'N'). "
-            "Fortran arrays are column-major and 1-indexed; convert to 0-indexed slices. "
-            "INOUT array arguments become &mut [f64]. "
+            "Fortran arrays are column-major: A(i,j) in Fortran (1-indexed) is stored as "
+            "a[(j-1)*lda + (i-1)] in Rust (0-indexed). "
+            "NEVER convert to row-major — preserve the Fortran column-major memory layout. "
+            "INOUT array arguments become &mut [f64], IN-only arrays become &[f64]. "
             "Replace DO loops with for loops. "
             "Return ONLY the Rust source code — no markdown fences, no explanations."
         )
@@ -358,7 +360,10 @@ class LLMClient:
             "You are an expert safe-Rust refactorer. "
             "Replace raw pointer arithmetic with slice indexing. "
             "Replace unsafe blocks with safe Rust idioms where semantically equivalent. "
-            "Preserve correctness exactly. "
+            "Fortran arrays are column-major: A(i,j) in Fortran (1-indexed) is stored as "
+            "a[(j-1)*lda + (i-1)] in Rust (0-indexed). "
+            "NEVER convert to row-major — preserve the Fortran column-major memory layout. "
+            "Preserve all other logic exactly. "
             "Return ONLY the Rust source code — no markdown fences, no explanations."
         )
         messages = [
