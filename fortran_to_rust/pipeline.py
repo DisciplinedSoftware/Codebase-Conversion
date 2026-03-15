@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from fortran_to_rust.benchmarker import BenchResult
     from fortran_to_rust.llm_client import LLMClient
     from fortran_to_rust.parser import FortranRoutine
-    from fortran_to_rust.strategies.base import ConversionResult, ConversionStrategy
+    from fortran_to_rust.strategies.base import ConversionResult
     from fortran_to_rust.test_harness import AccuracyResult
 
 _MAX_PIPELINE_RETRIES = 3
@@ -93,15 +93,18 @@ def _repair_functions(
     routine_map: Dict[str, "FortranRoutine"],
     accuracy_map: Dict[str, "AccuracyResult"],
     llm: "LLMClient",
-    strategy: "ConversionStrategy",
     log: Callable[[str], None],
 ) -> Tuple[Dict[str, str], List["ConversionResult"]]:
-    """Re-convert *failing_fns*, returning updated rust_sources and conversion_results.
+    """Apply targeted accuracy repair to *failing_fns*.
 
-    For each failing function:
-    - If LLM is available and accuracy data exists: use ``llm.repair_accuracy()``
-      so the LLM gets the specific numerical-error context.
-    - Otherwise: re-run ``strategy.convert()`` from scratch.
+    Each failing function gets one ``llm.repair_accuracy()`` call using the
+    specific numerical-error context from its last accuracy check.  If the LLM
+    is unavailable or repair fails, the function's source is left unchanged so
+    the pipeline can re-validate and report the failure.
+
+    Correction is kept *step-specific*: this function never re-runs
+    ``strategy.convert()`` — that would conflate the conversion step's
+    correction loop with the pipeline's revalidation pass.
     """
     from fortran_to_rust.rust_project import _ensure_top_level_pub_fn
 
@@ -112,51 +115,37 @@ def _repair_functions(
     for fn_lower in failing_fns:
         routine = routine_map.get(fn_lower.upper())
         if not routine:
-            log(f"  [yellow]⚠[/yellow]  {fn_lower}: no parsed routine — cannot re-convert.")
+            log(f"  [yellow]⚠[/yellow]  {fn_lower}: no parsed routine — skipping repair.")
             continue
 
         acc = accuracy_map.get(fn_lower)
         current_source = sources.get(fn_lower, "")
 
-        repaired_source: Optional[str] = None
+        if not llm.is_available:
+            log(f"  [yellow]⚠[/yellow]  {fn_lower}: LLM unavailable — cannot repair accuracy.")
+            continue
 
-        if llm.is_available and acc is not None and acc.max_abs_error is not None:
-            log(f"  [cyan]♻[/cyan]  {fn_lower}: accuracy repair (max_err={acc.max_abs_error:.2e})…")
-            try:
-                repaired_source = _strip_fences(
-                    llm.repair_accuracy(
-                        current_source,
-                        routine.source,
-                        fn_lower,
-                        acc.max_abs_error,
-                    )
-                )
-                repaired_source = _ensure_top_level_pub_fn(repaired_source, fn_lower)
-            except Exception as exc:
-                log(f"  [red]✗[/red]  LLM accuracy repair failed for {fn_lower}: {exc}")
-                repaired_source = None
+        if acc is None or acc.max_abs_error is None:
+            log(f"  [yellow]⚠[/yellow]  {fn_lower}: no accuracy error data — cannot repair.")
+            continue
 
-        if repaired_source is None:
-            log(f"  [cyan]♻[/cyan]  {fn_lower}: re-converting from scratch…")
-            try:
-                new_result = strategy.convert(
-                    routine,
-                    progress_callback=lambda msg: log(f"    {msg}"),
+        log(f"  [cyan]♻[/cyan]  {fn_lower}: accuracy repair (max_err={acc.max_abs_error:.2e})…")
+        try:
+            repaired_source = _strip_fences(
+                llm.repair_accuracy(
+                    current_source,
+                    routine.source,
+                    fn_lower,
+                    acc.max_abs_error,
                 )
-                if new_result.rust_source:
-                    repaired_source = new_result.rust_source
-                    idx = result_index.get(fn_lower)
-                    if idx is not None:
-                        results[idx] = new_result
-                    else:
-                        results.append(new_result)
-                        result_index[fn_lower] = len(results) - 1
-            except Exception as exc:
-                log(f"  [red]✗[/red]  Re-conversion failed for {fn_lower}: {exc}")
+            )
+            repaired_source = _ensure_top_level_pub_fn(repaired_source, fn_lower)
+        except Exception as exc:
+            log(f"  [red]✗[/red]  LLM accuracy repair failed for {fn_lower}: {exc}")
+            continue
 
         if repaired_source:
             sources[fn_lower] = repaired_source
-            # Update matching ConversionResult so it reflects the new source
             idx = result_index.get(fn_lower)
             if idx is not None:
                 old = results[idx]
@@ -164,8 +153,8 @@ def _repair_functions(
                 results[idx] = ConversionResult(
                     routine_name=old.routine_name,
                     rust_source=repaired_source,
-                    success=True,
-                    strategy_used=old.strategy_used + " (retry)",
+                    success=False,  # pipeline re-validates; success is set after re-check
+                    strategy_used=old.strategy_used + " (accuracy-repair)",
                     repair_rounds=old.repair_rounds + 1,
                     compiler_errors=old.compiler_errors,
                     warnings=old.warnings,
@@ -184,7 +173,10 @@ def run_post_conversion_loop(
     source_map: Dict[str, Path],
     routine_map: Dict[str, "FortranRoutine"],
     llm: "LLMClient",
-    strategy: "ConversionStrategy",
+    # Kept for backward compatibility; no longer used internally.
+    # Each pipeline step owns its own correction loop; re-conversion is not
+    # triggered during the revalidation pass.
+    strategy: object = None,
     *,
     max_retries: int = _MAX_PIPELINE_RETRIES,
     log: Optional[Callable[[str], None]] = None,
@@ -196,15 +188,17 @@ def run_post_conversion_loop(
 
     On each attempt the full sub-pipeline runs:
       1. Scaffold Cargo crate from *rust_sources*.
-      2. ``cargo build --release`` (+ LLM repair if it fails).
+      2. ``cargo build --release`` (+ LLM build repair — the build step's correction).
       3. ``cargo test``.
       4. Numerical accuracy check for every function.
       5. Performance benchmark for every function.
 
-    After each attempt, any functions whose accuracy check failed **or** whose
-    Rust benchmark binary could not run are re-converted (via LLM accuracy
-    repair or a full strategy re-conversion), and the loop repeats up to
-    *max_retries* additional times.
+    When accuracy or benchmark failures are detected, the pipeline applies a
+    *targeted* accuracy repair (``llm.repair_accuracy()``) for each failing
+    function — the accuracy step's own correction loop — and then re-runs ALL
+    validation steps from the top.  Re-conversion via ``strategy.convert()`` is
+    intentionally not performed here: the conversion step's correction loop
+    belongs inside the strategy, not in this revalidation pass.
 
     Parameters
     ----------
@@ -225,7 +219,7 @@ def run_post_conversion_loop(
     llm:
         Configured :class:`LLMClient` instance (may be unavailable).
     strategy:
-        The active :class:`ConversionStrategy` instance used to re-convert.
+        Deprecated / ignored.  Kept for backward-compatible call-sites.
     max_retries:
         Maximum number of *additional* attempts after the first.  Default: 3.
     log:
@@ -360,7 +354,6 @@ def run_post_conversion_loop(
             routine_map=routine_map,
             accuracy_map=accuracy_map,
             llm=llm,
-            strategy=strategy,
             log=_log,
         )
 

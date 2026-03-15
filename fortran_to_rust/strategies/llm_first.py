@@ -97,10 +97,15 @@ class LLMFirstStrategy(ConversionStrategy):
                     f"  [yellow]Could not fully compile after {_MAX_REPAIR_ROUNDS} repair rounds.[/yellow]"
                 )
 
+        # Accuracy validation — single check, no repair (pipeline handles repair)
+        acc_passed = self._fallback._accuracy_check_once(rust_source, routine)
+        if acc_passed is False:
+            cb("  [yellow]Accuracy check failed; pipeline will repair.[/yellow]")
+
         return ConversionResult(
             routine_name=routine.name,
             rust_source=rust_source,
-            success=True,
+            success=(acc_passed is not False),
             strategy_used=f"LLM-First ({self.llm.provider}/{self.llm.model})",
             repair_rounds=repair_rounds,
             compiler_errors=errors,
