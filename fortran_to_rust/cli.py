@@ -320,17 +320,22 @@ def _configure_llm(strategy_key: str) -> LLMClient:
         )
         return llm
 
+    # No auth found — offer the interactive setup wizard
+    from fortran_to_rust.auth_setup import prompt_auth_setup
+
+    configured = prompt_auth_setup(console)
+    if configured is not None and configured.is_available:
+        return configured
+
+    # Still no auth after setup (user skipped or setup failed)
     if strategy_key in ("1", "2"):
         console.print(
-            "\n  [yellow]⚠  No LLM API key detected.[/yellow]\n"
-            "  Strategies 1 and 2 require an API key.\n"
-            "  Set [bold]LLM_API_KEY[/bold] in your environment or a [bold].env[/bold] file,\n"
-            "  or log in with [bold]gh auth login[/bold] for GitHub Copilot.\n"
-            "  The Hybrid (Strategy 3) fallback will be used automatically."
+            "\n  [yellow]⚠[/yellow] No LLM available — "
+            "switching to Strategy 3 (Hybrid rule-based only)."
         )
     else:
         console.print(
-            "\n  [dim]No LLM API key — Strategy 3 will use rule-based conversion only.[/dim]"
+            "\n  [dim]No LLM available — Strategy 3 will use rule-based conversion only.[/dim]"
         )
     return llm
 

@@ -6,6 +6,9 @@
 # Run automatically by the devcontainer postCreateCommand, or manually at any
 # time with:  bash scripts/setup_auth.sh
 #
+# When the Python package is installed, delegates to the Python auth_setup
+# module so that the shell and conversion pipeline share identical logic.
+#
 # Two supported auth modes:
 #   1. GitHub CLI  — `gh auth login` (recommended; no key to store/rotate)
 #   2. .env file   — set LLM_API_KEY in a .env file in the project root
@@ -30,7 +33,36 @@ err()  { echo -e "${RED}[setup]${NC} $*"; }
 hr() { echo -e "${CYAN}──────────────────────────────────────────────────────${NC}"; }
 
 # ---------------------------------------------------------------------------
-# Check if auth is already satisfied
+# Delegate to Python when the package is importable
+# ---------------------------------------------------------------------------
+# The Python auth_setup module is the canonical implementation; the shell
+# script is used as a fallback for early devcontainer bootstrap (before pip
+# install completes) or when Python is unavailable.
+if python3 -c "from fortran_to_rust.auth_setup import prompt_auth_setup" 2>/dev/null; then
+    python3 - <<'PYEOF'
+from rich.console import Console
+from fortran_to_rust.auth_setup import prompt_auth_setup
+from fortran_to_rust.llm_client import LLMClient
+
+console = Console()
+console.rule("[bold cyan]Fortran-to-Rust — Authentication Setup[/bold cyan]", style="cyan")
+
+llm = LLMClient()
+if llm.is_available:
+    console.print(
+        f"\n  [green]✓[/green] Authentication already configured "
+        f"([bold]{llm.provider}[/bold] / [bold]{llm.model}[/bold]). All set!\n"
+    )
+else:
+    prompt_auth_setup(console)
+
+console.rule(style="cyan")
+PYEOF
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Check if auth is already satisfied (pure-bash fallback)
 # ---------------------------------------------------------------------------
 already_configured() {
     # 1. LLM_API_KEY in environment or .env file
