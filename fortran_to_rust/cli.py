@@ -238,7 +238,7 @@ def _fetch_and_select(
         raw = Prompt.ask(
             "\n[bold cyan]>[/bold cyan] "
             "Function names (comma-separated) OR sample size",
-            default="dgemm",
+            default="10",
         ).strip()
         wanted = _parse_sample_input(raw)
         console.print(f"  Selected: {', '.join(wanted)}")
