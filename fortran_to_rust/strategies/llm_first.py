@@ -19,7 +19,7 @@ from fortran_to_rust.parser import FortranRoutine, strip_comments
 from fortran_to_rust.strategies.base import ConversionResult, ConversionStrategy
 from fortran_to_rust.strategies.hybrid import HybridStrategy
 
-_MAX_REPAIR_ROUNDS = 2
+_MAX_REPAIR_ROUNDS = 3
 
 
 class LLMFirstStrategy(ConversionStrategy):

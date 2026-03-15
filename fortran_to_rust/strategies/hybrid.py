@@ -122,7 +122,7 @@ class HybridStrategy(ConversionStrategy):
     # Accuracy-gated repair loop
     # ------------------------------------------------------------------
 
-    _MAX_ACCURACY_RETRIES = 2
+    _MAX_ACCURACY_RETRIES = 3
     _ACCURACY_TOLERANCE = 1e-6  # tighter than test_harness default for early bail-out
 
     def _accuracy_repair_loop(
