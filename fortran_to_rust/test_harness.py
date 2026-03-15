@@ -735,7 +735,7 @@ def run_accuracy_check(
     routine_kind   = getattr(routine, "kind", "subroutine")
     return_ftype   = getattr(routine, "return_type", None) or "DOUBLE PRECISION"
 
-    fortran_keep_dir = (crate_dir / "fortran") if crate_dir else None
+    fortran_keep_dir = (crate_dir.parent / "fortran") if crate_dir else None
 
     for t in range(num_tests):
         driver = generate_fortran_driver(
