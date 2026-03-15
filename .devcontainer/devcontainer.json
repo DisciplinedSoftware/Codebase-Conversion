@@ -1,15 +1,9 @@
 {
   "name": "Fortran-to-Rust Conversion",
-  // Build from our Dockerfile so gfortran, f2c, and Rust are pre-installed.
+  // Build from our Dockerfile so gfortran, f2c, gh, and Rust are pre-installed.
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
-  },
-
-  // Devcontainer features — installed on top of the Dockerfile image.
-  // github-cli provides the `gh` command for `gh auth login` and token discovery.
-  "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   // Run as the non-root "vscode" user that the base image ships with.
   "remoteUser": "vscode",
