@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -76,6 +77,14 @@ def run(output_dir: Path) -> None:
     """Launch the interactive conversion wizard."""
     _print_banner()
     console.print(Rule(style="cyan"))
+
+    # Create a timestamped snapshot directory for this run's artifacts.
+    # BLAS sources are fetched/cached at output_dir; everything generated
+    # (Rust crate, reports) lands in run_dir so each run is self-contained.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"report_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"  [dim]Run output: {run_dir}[/dim]")
 
     # --- 1. Library selection -----------------------------------------------
     library = _ask_library()
@@ -144,7 +153,7 @@ def run(output_dir: Path) -> None:
         if r.rust_source
     }
     crate_name = f"{library.lower()}_converted"
-    crate_dir = scaffold_crate(output_dir, crate_name, rust_sources)
+    crate_dir = scaffold_crate(run_dir, crate_name, rust_sources)
     console.print(f"  [green]✓[/green] Crate created at {crate_dir}")
 
     build_ok, build_out = build_crate(crate_dir)
@@ -183,7 +192,7 @@ def run(output_dir: Path) -> None:
     console.print()
     console.print(Panel("[bold]Step 8 — Generating report[/bold]", style="cyan"))
     report_path = generate_report(
-        output_dir=output_dir,
+        output_dir=run_dir,
         library=library,
         strategy_name=STRATEGY_NAMES[strategy_key],
         conversion_results=conversion_results,
