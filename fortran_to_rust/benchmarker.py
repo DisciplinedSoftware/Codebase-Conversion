@@ -37,7 +37,45 @@ from fortran_to_rust.test_harness import (
     write_dataset_file,
 )
 
-_REPS = 10   # number of timed repetitions
+_REPS = 10        # number of timed repetitions (accuracy / quick checks)
+_BENCH_REPS = 50  # repetitions used by run_benchmark — large enough for
+                  # hundreds-of-milliseconds total timing on matrix operations
+
+# Dimension defaults for benchmark runs.  These are intentionally much larger
+# than the accuracy-test defaults in test_harness._DIM_DEFAULTS so that each
+# benchmark measures meaningful, non-trivial work (typically hundreds of ms).
+_BENCH_DIM_DEFAULTS: Dict[str, int] = {
+    "M": 256,
+    "N": 256,
+    "K": 256,
+    "LDA": 256,
+    "LDB": 256,
+    "LDC": 256,
+    "LDE": 256,
+    "LDF": 256,
+    "INCX": 1,
+    "INCY": 1,
+    "INC": 1,
+    "NRHS": 64,
+    "KL": 32,
+    "KU": 32,
+    "KB": 256,
+    "P": 128,
+    "Q": 128,
+}
+
+
+def _bench_assign_dims(arg_decls: Dict[str, "ArgDecl"]) -> Dict[str, int]:
+    """Return concrete integer values for benchmark runs using large dimensions.
+
+    Mirrors :func:`~fortran_to_rust.test_harness._assign_dims` but draws from
+    :data:`_BENCH_DIM_DEFAULTS` so that the generated dataset and benchmark
+    drivers operate on realistically-sized arrays (e.g. 256×256 matrices for
+    BLAS level-3 routines).
+    """
+    from fortran_to_rust.test_harness import _assign_dims as _base_assign_dims
+    base = _base_assign_dims(arg_decls)
+    return {name: _BENCH_DIM_DEFAULTS.get(name, val) for name, val in base.items()}
 
 
 @dataclass
@@ -364,7 +402,7 @@ def run_benchmark(
     crate_dir: Optional[Path],
     *,
     routine=None,
-    reps: int = _REPS,
+    reps: int = _BENCH_REPS,
     fortran_ref_dir: Optional[Path] = None,
     datasets_dir: Optional[Path] = None,
 ) -> BenchResult:
@@ -372,6 +410,11 @@ def run_benchmark(
 
     Works for any function: generates all benchmark drivers on the fly from
     the argument declarations parsed from the Fortran source.
+
+    Uses large matrix dimensions (see :data:`_BENCH_DIM_DEFAULTS`) and
+    :data:`_BENCH_REPS` repetitions by default so that each benchmark run
+    takes a meaningful amount of time (typically hundreds of milliseconds for
+    BLAS level-2/3 routines).
     """
     fn = function_name.upper()
     details: List[str] = []
@@ -391,7 +434,7 @@ def run_benchmark(
     else:
         return BenchResult(function_name=fn, error_message="No routine or source path provided.")
 
-    assigned_dims = _assign_dims(arg_decls)
+    assigned_dims = _bench_assign_dims(arg_decls)
 
     # Generate a single dataset (test_index=0) and write it to a shared file
     # that both Fortran and Rust benchmark drivers will read at runtime.
