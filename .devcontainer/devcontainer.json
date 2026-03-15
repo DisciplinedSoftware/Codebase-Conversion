@@ -29,9 +29,8 @@
         "ms-python.vscode-pylance",
         "rust-lang.rust-analyzer",
         "tamasfe.even-better-toml",
-        "serayuzgur.crates",
-        "belfz.migrate-crate",
-        "tht13.html-preview-vscode",
+        "fill-labs.dependi",
+        "george-alisson.html-preview-vscode",
         "vadimcn.vscode-lldb",
         "github.copilot",
         "github.copilot-chat"
