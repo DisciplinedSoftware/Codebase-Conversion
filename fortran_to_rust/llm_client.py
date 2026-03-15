@@ -1,18 +1,19 @@
 """LLM API client.
 
 Supports:
-  - GitHub Copilot  (https://api.githubcopilot.com — default, for Copilot subscribers)
+    - GitHub Copilot  (https://api.githubcopilot.com — optional, for Copilot subscribers)
   - GitHub Models   (https://models.inference.ai.azure.com — free tier, separate product)
   - OpenAI          (https://api.openai.com/v1/chat/completions)
+    - Anthropic       (https://api.anthropic.com/v1/messages)
   - Any OpenAI-compatible endpoint (e.g. Ollama, LM Studio)
 
 Configuration is read from environment variables (and from a ``.env`` file
 in the current working directory, which is loaded automatically):
 
-    LLM_PROVIDER   = "github_models" | "copilot" | "openai" | "openai_compatible"
+    LLM_PROVIDER   = "github_models" | "copilot" | "openai" | "openai_compatible" | "anthropic"
                      (default: github_models)
     LLM_API_KEY    = GitHub PAT / OpenAI API key / custom bearer token
-    LLM_BASE_URL   = base URL for openai_compatible provider
+    LLM_BASE_URL   = base URL for openai_compatible / anthropic provider
     LLM_MODEL      = model name override  (default: gpt-4o)
 
 GitHub Copilot provider (recommended for Copilot subscribers):
@@ -47,6 +48,7 @@ _COPILOT_ENDPOINT = "https://api.githubcopilot.com/chat/completions"
 _COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 _GITHUB_MODELS_ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
 _OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+_ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages"
 _DEFAULT_MODEL = "gpt-4o"
 _REQUEST_TIMEOUT = 120  # seconds
 _GH_CLI_TIMEOUT = 8  # seconds — gh auth token should respond quickly
@@ -299,6 +301,8 @@ class LLMClient:
             return _COPILOT_ENDPOINT
         if self.provider == "openai":
             return _OPENAI_ENDPOINT
+        if self.provider == "anthropic":
+            return os.environ.get("LLM_BASE_URL", _ANTHROPIC_ENDPOINT)
         if self.provider == "openai_compatible":
             return os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1/chat/completions")
         return _GITHUB_MODELS_ENDPOINT
@@ -314,6 +318,11 @@ class LLMClient:
             "Accept": "application/json",
         }
         if self.api_key:
+            if self.provider == "anthropic":
+                headers.pop("Accept", None)
+                headers["x-api-key"] = self.api_key
+                headers["anthropic-version"] = "2023-06-01"
+                return headers
             if self.provider == "copilot":
                 # Try the Copilot token exchange; fall back to using the raw
                 # GitHub token directly (github_models-style) if it fails so
@@ -363,17 +372,23 @@ class LLMClient:
                 "     For OpenAI: also set LLM_PROVIDER=openai and LLM_API_KEY=<openai-key>.\n"
                 "  OR\n"
                 "  3. Set LLM_PROVIDER=openai_compatible and LLM_BASE_URL=<endpoint> for\n"
-                "     a local model server (e.g. Ollama, LM Studio)."
+                "     a local model server (e.g. Ollama, LM Studio).\n"
+                "  OR\n"
+                "  4. Set LLM_PROVIDER=anthropic and LLM_API_KEY=<anthropic-key>."
             )
 
         streaming = self.stream_callback is not None
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": streaming,
-        }
+        payload: Dict[str, Any]
+        if self.provider == "anthropic":
+            payload = self._anthropic_payload(messages, temperature, max_tokens, streaming)
+        else:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": streaming,
+            }
 
         _MAX_RATE_LIMIT_WAIT = 30  # seconds — never sleep longer than this per attempt
         _MAX_RATE_LIMIT_RETRIES = 5
@@ -415,6 +430,8 @@ class LLMClient:
                 if streaming:
                     return self._consume_stream(resp)
                 data = resp.json()
+                if self.provider == "anthropic":
+                    return self._extract_anthropic_text(data)
                 return data["choices"][0]["message"]["content"]
             except LLMError:
                 raise
@@ -431,6 +448,9 @@ class LLMClient:
 
         Returns the full concatenated text when the stream ends.
         """
+        if self.provider == "anthropic":
+            return self._consume_anthropic_stream(resp)
+
         chunks: List[str] = []
         for raw_line in resp.iter_lines():
             if not raw_line:
@@ -450,6 +470,86 @@ class LLMClient:
                         self.stream_callback(content)
             except (json.JSONDecodeError, KeyError, IndexError):
                 continue
+        return "".join(chunks)
+
+    def _anthropic_payload(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        streaming: bool,
+    ) -> Dict[str, Any]:
+        """Convert OpenAI-style messages to Anthropic Messages API payload."""
+        system_chunks: List[str] = []
+        anthropic_messages: List[Dict[str, str]] = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if not content:
+                continue
+            if role == "system":
+                system_chunks.append(content)
+                continue
+            if role not in ("user", "assistant"):
+                role = "user"
+            anthropic_messages.append({"role": role, "content": content})
+
+        if not anthropic_messages:
+            anthropic_messages.append({"role": "user", "content": "Continue."})
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": anthropic_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": streaming,
+        }
+        if system_chunks:
+            payload["system"] = "\n\n".join(system_chunks)
+        return payload
+
+    @staticmethod
+    def _extract_anthropic_text(data: Dict[str, Any]) -> str:
+        """Extract text content from a non-stream Anthropic response."""
+        out: List[str] = []
+        for block in data.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                txt = block.get("text")
+                if txt:
+                    out.append(txt)
+        if out:
+            return "".join(out)
+        raise KeyError("No text content found in Anthropic response")
+
+    def _consume_anthropic_stream(self, resp: "requests.Response") -> str:
+        """Parse Anthropic SSE stream and emit text deltas via callback."""
+        chunks: List[str] = []
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if not data:
+                continue
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = event.get("type")
+            if event_type in ("message_stop", "ping"):
+                continue
+            if event_type == "content_block_delta":
+                delta = event.get("delta", {})
+                text = delta.get("text")
+                if text:
+                    chunks.append(text)
+                    if self.stream_callback:
+                        self.stream_callback(text)
+
         return "".join(chunks)
 
     @staticmethod

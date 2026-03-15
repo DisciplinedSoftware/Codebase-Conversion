@@ -20,10 +20,11 @@ Options
 
 Environment variables
 ---------------------
-  LLM_PROVIDER    copilot | openai | openai_compatible  (default: copilot)
+    LLM_PROVIDER    github_models | copilot | openai | openai_compatible | anthropic
+                                    (default: github_models)
   LLM_API_KEY     Bearer token / API key
   LLM_MODEL       Model override (default: gpt-4o)
-  LLM_BASE_URL    Base URL for openai_compatible provider
+    LLM_BASE_URL    Base URL for openai_compatible or anthropic provider
 """
 
 from __future__ import annotations

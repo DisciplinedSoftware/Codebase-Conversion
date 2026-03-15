@@ -131,6 +131,11 @@ LLM_API_KEY=<your-github-pat>
 LLM_PROVIDER=openai
 LLM_API_KEY=sk-...
 
+# Anthropic (native gateway)
+LLM_PROVIDER=anthropic
+LLM_API_KEY=sk-ant-...
+LLM_MODEL=claude-sonnet-4-5
+
 # Any OpenAI-compatible endpoint (e.g. Ollama)
 LLM_PROVIDER=openai_compatible
 LLM_BASE_URL=http://localhost:11434/v1/chat/completions
